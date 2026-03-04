@@ -1,6 +1,7 @@
 import { VoucherModel } from '../models/voucherModel.js';
 import { FedaPayService } from '../services/fedapayService.js';
 import { LicenseService } from '../services/licenseService.js';
+import { MonitoringService } from '../services/monitoring/monitoringService.js';
 import pool from '../config/db.js';
 
 export const WebhookController = {
@@ -11,6 +12,11 @@ export const WebhookController = {
      */
     async handleFedapay(req, res, next) {
         try {
+            // 🛡️ CIRCUIT BREAKER GUARD (Google/Meta Style)
+            if (MonitoringService.isCircuitOpen('FEDAPAY')) {
+                return res.status(503).send('Service Temporarily Overloaded (Circuit Open). Try again later.');
+            }
+
             const event = req.body;
 
             // On ne traite que les paiements validés
@@ -36,6 +42,16 @@ export const WebhookController = {
 
                     // L'admin a payé: Génération, écriture sur Firestore (avec le Plan) et mise à jour MySQL
                     await LicenseService.generateAndActivateLicense(userId, domain || 'tiketmomo.app', internalTxId, transaction.amount, plan, parseInt(durationStr));
+
+                    // 🛡️ AUDIT LOG IMMUTABLE (Stripe Style)
+                    await MonitoringService.logAudit(pool, {
+                        managerId: userId,
+                        actionType: 'LICENSE_ACTIVATION',
+                        resourceId: internalTxId,
+                        severity: 'MEDIUM',
+                        details: { plan, duration: durationStr, amount: transaction.amount },
+                        req
+                    });
 
                     return res.status(200).json({ success: true, message: 'License Delivery Processed' });
                 }
@@ -85,7 +101,14 @@ export const WebhookController = {
                 VALUES (?, ?, ?, ?, 'FAILED', NULL, 'PENDING')
              `, [internalTxId, managerId, transaction.amount, 'hidden']);
                         await connection.commit();
-                        console.error(`🚨 RUPTURE DE STOCK: Manager ${managerId}, Profil ${profile}`);
+
+                        // 🚩 LOG ET ALERTE ADMIN
+                        await MonitoringService.logError('PAYMENT_STOCK', `Rupture critique pour profil ${profile}`, {
+                            manager_id: managerId,
+                            tx_id: internalTxId,
+                            severity: 'CRITICAL'
+                        });
+
                         return res.status(200).send('Stock depleted, failed.');
                     }
 
@@ -101,6 +124,16 @@ export const WebhookController = {
           `, [internalTxId, managerId, transaction.amount, 'hidden', ticketId]);
 
                     await connection.commit(); // Fin ACID sécurisée
+
+                    // 🛡️ AUDIT LOG IMMUTABLE (Stripe Style)
+                    await MonitoringService.logAudit(pool, {
+                        managerId,
+                        actionType: 'VOUCHER_PURCHASE',
+                        resourceId: internalTxId,
+                        severity: 'LOW',
+                        details: { profile, voucher_id: ticketId, amount: transaction.amount },
+                        req
+                    });
 
                     // 🤖 DÉCLENCHEUR INTELLIGENCE ARTIFICIELLE (Background Task)
                     // Importation dynamique propre pour éviter les dépendances circulaires
@@ -125,7 +158,12 @@ export const WebhookController = {
             return res.status(200).send('Event Ignored');
 
         } catch (err) {
-            console.error('[CRITICAL] Erreur Webhook FedaPay:', err);
+            // 🛡️ RÉGISTRE D'ÉCHEC POUR LE CIRCUIT BREAKER
+            MonitoringService.registerFailure('FEDAPAY');
+
+            // 🚩 LOG ERREUR WEBHOOK GÉNÉRALE
+            await MonitoringService.logError('FEDAPAY_WEBHOOK', err, { severity: 'CRITICAL' });
+
             // Il faut renvoyer une erreur 500 pour que FedaPay réessaie plus tard (Retry Logic)
             res.status(500).send('Webhook Processing Failed');
         }

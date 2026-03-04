@@ -28,12 +28,20 @@ export const PaymentController = {
       // (Performance NVMe : lecture ultra-rapide avec l'index composite)
       const stock = await VoucherModel.getAvailableVoucherCode(managerId, profile);
       if (!stock) {
-        return res.status(404).send(`
+        return res.status(200).send(`
           <html>
-            <body style="font-family: sans-serif; text-align: center; padding: 50px;">
-              <h1 style="color: #EF4444;">Rupture de Stock</h1>
-              <p>Désolé, il n'y a plus de tickets "${profile}" disponibles pour le moment.</p>
-              <p>Veuillez contacter l'administrateur.</p>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600&display=swap" rel="stylesheet">
+            </head>
+            <body style="font-family: 'Outfit', sans-serif; text-align: center; padding: 50px; background: #f8f7fa; color: #333;">
+              <div style="max-width: 400px; margin: 0 auto; background: white; padding: 40px; border-radius: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.05);">
+                  <h1 style="color: #EF4444; font-size: 4rem; margin: 0;">📦</h1>
+                  <h2 style="margin-top: 20px;">Rupture de Stock</h2>
+                  <p style="color: #666; line-height: 1.6;">Désolé, il n'y a plus de tickets <strong>"${profile}"</strong> disponibles pour le moment.</p>
+                  <p style="font-size: 0.9rem; color: #999;">Le gérant a été automatiquement notifié pour le réapprovisionnement.</p>
+                  <button onclick="window.location.reload()" style="margin-top: 30px; background: #673AB7; color: white; border: none; padding: 12px 30px; border-radius: 12px; font-weight: 600; cursor: pointer;">Réessayer</button>
+              </div>
             </body>
           </html>
         `);

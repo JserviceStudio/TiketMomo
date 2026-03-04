@@ -55,9 +55,13 @@ import webhookRoutes from './routes/webhookRoutes.js';
 import managerRoutes from './routes/managerRoutes.js';
 import salesRoutes from './routes/salesRoutes.js';
 import licenseRoutes from './routes/licenseRoutes.js';
+import reportRoutes from './routes/reportRoutes.js';
+import adminRoutes from './routes/admin/adminRoutes.js';
 
 // 🔌 Branchement des routes métiers avec versionnement (Google API Design)
+app.use('/admin', adminRoutes); // Interface de gestion Administrative
 app.use('/api/v1/licenses', licenseRoutes); // Vente de licences SaaS
+app.use('/api/v1/reports', reportRoutes);   // 🚩 Rapports Multi-Apps (Jeux, WiFi, etc.)
 app.use('/api/v1/managers', managerRoutes); // Routes GERANT (Onboarding/Config)
 app.use('/api/v1/vouchers', voucherRoutes);
 app.use('/api/v1/sales', salesRoutes); // Routes VENTES & STATS
@@ -79,8 +83,29 @@ if (process.env.NODE_ENV !== 'test') { // Ne pas lancer pendant les tests unitai
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
+// 🏗️ GESTION DU CYCLE DE VIE (Graceful Shutdown - Norme Google)
+import pool from './config/db.js';
+
+const server = app.listen(PORT, () => {
   logger.info(`🚀 Serveur TiketMomo démarré sur le port ${PORT}`);
 });
+
+const shutdown = async () => {
+  logger.info('🛑 Signal reçu: Fermeture du serveur...');
+  server.close(async () => {
+    logger.info('📡 Serveur HTTP fermé.');
+    try {
+      await pool.end();
+      logger.info('🗄️ Pool de connexion MySQL fermé.');
+      process.exit(0);
+    } catch (err) {
+      logger.error('❌ Erreur lors de la fermeture du pool MySQL:', err);
+      process.exit(1);
+    }
+  });
+};
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
 export { app, logger };

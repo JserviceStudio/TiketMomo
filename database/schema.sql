@@ -4,12 +4,29 @@
 CREATE TABLE IF NOT EXISTS managers (
     id VARCHAR(128) PRIMARY KEY, -- Firebase UID
     email VARCHAR(255) NOT NULL UNIQUE,
-    api_key VARCHAR(128) UNIQUE DEFAULT NULL, -- 🔑 Pour l'app mobile (Auth SaaS)
-    license_key VARCHAR(255) DEFAULT NULL, -- 📜 Licence SaaS
-    fedapay_public_key VARCHAR(255) DEFAULT NULL, -- 💳 Clé Publique FedaPay (Apprentissage auto)
+    api_key VARCHAR(128) UNIQUE DEFAULT NULL, 
+    license_key VARCHAR(255) DEFAULT NULL, 
+    license_type ENUM('WIFI', 'GAMES', 'FULL') DEFAULT 'WIFI', -- 🎮 Support Multi-App
+    fedapay_public_key VARCHAR(255) DEFAULT NULL, 
     name VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 📊 NEW : Table des Rapports de Ventes (Transmission Manager -> Admin)
+-- Utilisable pour Wi-Fi, Salle de Jeux, etc.
+CREATE TABLE IF NOT EXISTS sales_reports (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    manager_id VARCHAR(128) NOT NULL,
+    app_id ENUM('WIFI_SAAS', 'GAMES_SAAS') NOT NULL, -- Distingue l'origine du rapport
+    report_date DATE NOT NULL,
+    total_sales DECIMAL(15, 2) DEFAULT 0.00,
+    total_transactions INT DEFAULT 0,
+    raw_data JSON, -- Stocke le détail (ex: liste des jeux, durée, etc.)
+    status ENUM('SUBMITTED', 'REVIEWED', 'ARCHIVED') DEFAULT 'SUBMITTED',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (manager_id) REFERENCES managers(id) ON DELETE CASCADE,
+    INDEX idx_manager_app_date (manager_id, app_id, report_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Table des Sites/Routeurs MikroTik
@@ -62,3 +79,20 @@ CREATE TABLE IF NOT EXISTS transactions (
     FOREIGN KEY (voucher_id) REFERENCES vouchers(id) ON DELETE SET NULL,
     INDEX idx_manager_status (manager_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 🛡️ IMMUTABLE SYSTEM : Journal d'Audit Pro (Stripe/Google Style)
+-- Enregistre chaque action critique qui impacte les données financières ou la sécurité.
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    manager_id VARCHAR(128), -- NULL si action système/admin
+    action_type VARCHAR(100) NOT NULL, -- ex: 'VOUCHER_PURCHASE', 'LICENSE_ACTIVATION', 'CONFIG_CHANGE'
+    resource_id VARCHAR(128), -- ID de l'objet impacté (Transaction, Voucher, etc.)
+    severity ENUM('LOW', 'MEDIUM', 'HIGH', 'CRITICAL') DEFAULT 'LOW',
+    details JSON, -- Payload complet de l'action pour preuve
+    ip_address VARCHAR(45),
+    user_agent TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_manager_action (manager_id, action_type),
+    INDEX idx_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
