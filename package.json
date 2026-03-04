@@ -1,0 +1,25 @@
+{
+  "name": "tiketmomo",
+  "version": "1.0.0",
+  "description": "Backend Multi-Tenant pour la gestion de vouchers Wi-Fi via MikroTik",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.2.1",
+    "firebase-admin": "^13.7.0",
+    "helmet": "^8.0.0",
+    "joi": "^17.13.3",
+    "morgan": "^1.10.0",
+    "mysql2": "^3.11.5",
+    "node-cron": "^4.2.1",
+    "pino": "^9.5.0",
+    "pino-pretty": "^13.0.0"
+  }
+}
