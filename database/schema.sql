@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS vouchers (
     id VARCHAR(128) PRIMARY KEY, -- UUID v4
     manager_id VARCHAR(128) NOT NULL, -- 🛡️ ISOLATION STRICTE
     site_id VARCHAR(128) NOT NULL,
+    profile VARCHAR(100) NOT NULL, -- 🌟 FIX : Type de ticket (ex: 100F-6H)
     code VARCHAR(50) NOT NULL,
     price DECIMAL(10, 2) NOT NULL,
     duration_minutes INT NOT NULL,
@@ -41,7 +42,7 @@ CREATE TABLE IF NOT EXISTS vouchers (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (manager_id) REFERENCES managers(id) ON DELETE CASCADE,
     FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
-    INDEX idx_manager_site_used (manager_id, site_id, used), -- 🚀 NVMe Ultra Opti: Recherche multi-critères < 5ms
+    INDEX idx_manager_profile_used (manager_id, profile, used), -- 🚀 NVMe Ultra Opti: Recherche multi-critères < 5ms
     INDEX idx_transaction (transaction_id),    -- Idempotence Payment API
     UNIQUE KEY unique_code_per_site (site_id, code) -- Évite doublons sur un routeur
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

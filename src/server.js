@@ -54,8 +54,10 @@ import paymentRoutes from './routes/paymentRoutes.js';
 import webhookRoutes from './routes/webhookRoutes.js';
 import managerRoutes from './routes/managerRoutes.js';
 import salesRoutes from './routes/salesRoutes.js';
+import licenseRoutes from './routes/licenseRoutes.js';
 
 // 🔌 Branchement des routes métiers avec versionnement (Google API Design)
+app.use('/api/v1/licenses', licenseRoutes); // Vente de licences SaaS
 app.use('/api/v1/managers', managerRoutes); // Routes GERANT (Onboarding/Config)
 app.use('/api/v1/vouchers', voucherRoutes);
 app.use('/api/v1/sales', salesRoutes); // Routes VENTES & STATS
@@ -68,10 +70,11 @@ app.use(notFoundHandler);
 // Handler d'erreur global (Enterprise Error Handling)
 app.use(errorHandler);
 
-// 🧹 Lancement des tâches planifiées en arrière-plan (Nettoyage DB auto 3 Jours)
+// 🧹 Lancement des tâches planifiées en arrière-plan
 import { CronService } from './services/cronService.js';
 if (process.env.NODE_ENV !== 'test') { // Ne pas lancer pendant les tests unitaires
   CronService.startCleanupTask();
+  CronService.startLicenseMonitorTask(); // 🔔 Push Monitor SaaS
 }
 
 const PORT = process.env.PORT || 3000;

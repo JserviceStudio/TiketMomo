@@ -1,5 +1,6 @@
 import { VoucherModel } from '../models/voucherModel.js';
 import { FedaPayService } from '../services/fedapayService.js';
+import { LicenseService } from '../services/licenseService.js';
 import pool from '../config/db.js';
 
 export const WebhookController = {
@@ -10,21 +11,36 @@ export const WebhookController = {
      */
     async handleFedapay(req, res, next) {
         try {
-            // 1. Zero-Trust : Vérification de la signature du webhook
-            // const signature = req.headers['x-fedapay-signature'];
-            // const isValid = FedaPayService.verifySignature(req.rawBody, signature);
-            // if (!isValid) return res.status(401).send('Invalid signature');
-
             const event = req.body;
 
             // On ne traite que les paiements validés
             if (event.name === 'transaction.approved') {
                 const transaction = event.entity;
-
-                // FedaPay transmet nos data personnalisées
                 const metadata = transaction.custom_metadata;
+
                 if (!metadata) return res.status(200).send('No metadata. Ignored.');
 
+                // 🌟 BIFURCATION MÉTIER : EST-CE UN ACHAT DE LICENCE SAAS ?
+                if (metadata.type === 'LICENSE_PURCHASE') {
+                    const userId = metadata.user_id;
+                    const domain = metadata.domain;
+                    const internalTxId = metadata.internal_tx_id;
+                    const plan = metadata.plan || 'PRO'; // Par défaut PRO si non spécifié
+                    const durationStr = metadata.duration || '1'; // Durée par défaut 1 mois
+
+                    if (!userId || !internalTxId) return res.status(200).send('Missing internal license parameters.');
+
+                    // On vérifie (Idempotence) si cette transaction FedaPay est déjà exécutée
+                    const [existing] = await pool.execute('SELECT id FROM transactions WHERE id = ?', [internalTxId]);
+                    if (existing.length > 0) return res.status(200).send('License already provided (Idempotent)');
+
+                    // L'admin a payé: Génération, écriture sur Firestore (avec le Plan) et mise à jour MySQL
+                    await LicenseService.generateAndActivateLicense(userId, domain || 'tiketmomo.app', internalTxId, transaction.amount, plan, parseInt(durationStr));
+
+                    return res.status(200).json({ success: true, message: 'License Delivery Processed' });
+                }
+
+                // 🛒 SINON : C'EST UN ACHAT STANDARD DE TICKET WIFI
                 const managerId = metadata.manager_id;
                 const profile = metadata.profile;
                 const internalTxId = metadata.internal_tx_id; // tx_1414... généré par renderCheckoutPage
@@ -47,30 +63,38 @@ export const WebhookController = {
                         return res.status(200).send('Already processed');
                     }
 
-                    // B- Trouver un ticket Libre (Règle 4: Indexation)
-                    const [freeVouchers] = await connection.execute(`
-            SELECT id, code FROM vouchers 
-            WHERE manager_id = ? AND profile = ? AND used = 0 
-            LIMIT 1 FOR UPDATE SKIP LOCKED
-          `, [managerId, profile]);
+                    // B- Trouver un ticket Libre (Règle 4: Indexation NVMe Striée)
+                    // On utilise l'index 'idx_manager_profile_used' pour une réponse < 5ms
+                    let findVoucherSql = 'SELECT id, code FROM vouchers WHERE manager_id = ? AND profile = ? AND used = 0';
+                    let queryParams = [managerId, profile];
+
+                    // Si on a un site_id spécifique dans les métadonnées, on affine la recherche
+                    if (metadata.site_id) {
+                        findVoucherSql += ' AND site_id = ?';
+                        queryParams.push(metadata.site_id);
+                    }
+
+                    findVoucherSql += ' LIMIT 1 FOR UPDATE SKIP LOCKED';
+
+                    const [freeVouchers] = await connection.execute(findVoucherSql, queryParams);
 
                     if (freeVouchers.length === 0) {
-                        // Rupture de stock critique ! Le payeur a été débité mais pas de ticket.
-                        // On logge l'erreur (Enterprise Error Handling), on devrait coder un module de remboursement plus tard.
+                        // Rupture de stock critique ! 
                         await connection.execute(`
                 INSERT INTO transactions (id, manager_id, amount, phone_number, status, voucher_id, mikrotik_status) 
                 VALUES (?, ?, ?, ?, 'FAILED', NULL, 'PENDING')
              `, [internalTxId, managerId, transaction.amount, 'hidden']);
                         await connection.commit();
+                        console.error(`🚨 RUPTURE DE STOCK: Manager ${managerId}, Profil ${profile}`);
                         return res.status(200).send('Stock depleted, failed.');
                     }
 
                     const ticketId = freeVouchers[0].id;
 
-                    // C- Marquer le ticket comme utilisé (Associant à la transaction)
+                    // C- Marquer le ticket comme utilisé
                     await connection.execute('UPDATE vouchers SET used = 1, transaction_id = ? WHERE id = ?', [internalTxId, ticketId]);
 
-                    // D- Insérer la transaction comme SUCCESS en BD
+                    // D- Insérer la transaction comme SUCCESS
                     await connection.execute(`
             INSERT INTO transactions (id, manager_id, amount, phone_number, status, voucher_id, mikrotik_status) 
             VALUES (?, ?, ?, ?, 'SUCCESS', ?, 'PENDING')
@@ -78,12 +102,14 @@ export const WebhookController = {
 
                     await connection.commit(); // Fin ACID sécurisée
 
-                    // 🤖 DÉCLENCHEUR INTELLIGENCE ARTIFICIELLE (Asynchrone)
-                    // On ne fait pas "await" pour ne pas ralentir la réponse FedaPay. 
-                    // Ça tourne en tâche de fond dans Node.JS
-                    import('../controllers/salesController.js').then(({ SalesController }) => {
-                        SalesController.checkStockThresholdAndNotify(managerId, profile).catch(e => console.error(e));
-                    });
+                    // 🤖 DÉCLENCHEUR INTELLIGENCE ARTIFICIELLE (Background Task)
+                    // Importation dynamique propre pour éviter les dépendances circulaires
+                    import('./salesController.js')
+                        .then(module => {
+                            const sc = module.SalesController || module.default?.SalesController;
+                            if (sc) sc.checkStockThresholdAndNotify(managerId, profile).catch(e => console.error("FCM Error:", e));
+                        })
+                        .catch(err => console.error("SalesController Import Error:", err));
 
                     return res.status(200).json({ success: true, message: 'Webhook Processed' });
 

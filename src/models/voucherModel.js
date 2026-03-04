@@ -9,22 +9,22 @@ export const VoucherModel = {
         if (!vouchers || vouchers.length === 0) return 0;
 
         // Préparation de la requête pour insertion multiple
+        // 🌟 FIX : Insertion de la colonne 'profile'
         const sql = `
       INSERT IGNORE INTO vouchers 
-      (id, manager_id, site_id, code, price, duration_minutes, used, created_at) 
+      (id, manager_id, site_id, profile, code, price, duration_minutes, used, created_at) 
       VALUES ?
     `;
 
         // Transformation des données (Mapping)
         const values = vouchers.map((v) => [
-            // Utilisation du username comme ID unique s'il est fort, ou génération d'un UUID si nécessaire.
-            // Le mobile envoie username = code du ticket (ex: Ac3041)
             `${managerId}_${siteId}_${v.username}`, // Génération ID Composite
             managerId, // 🛡️ ISOLATION STRICTE
             siteId,
+            v.profile || 'default', // 🔔 Correction : Récupération du profil envoyé par l'app
             v.username, // Le code du voucher affiché
             v.price,
-            0, // duration_minutes: L'app ne le fournit pas directement dans ce payload, on mettra 0 par défaut pour l'instant
+            v.duration || 0, // duration_minutes
             false, // used: non utilisé
             new Date(v.generatedAt)
         ]);
@@ -39,11 +39,10 @@ export const VoucherModel = {
      * Utilisé avant d'afficher la page de paiement FedaPay.
      */
     async getAvailableVoucherCode(managerId, profile) {
-        // En prod, vous pourriez ajouter "AND profile = ?" si vous stockiez le tarif/durée exact dans `vouchers`.
-        // Ici on check juste si y a un ticket libre pour ce manager
+        // 🌟 FIX : Recherche filtrée strictement par profil
         const [rows] = await pool.execute(
-            `SELECT id, code FROM vouchers WHERE manager_id = ? AND used = 0 LIMIT 1`,
-            [managerId]
+            `SELECT id, code FROM vouchers WHERE manager_id = ? AND profile = ? AND used = 0 LIMIT 1`,
+            [managerId, profile]
         );
         return rows.length > 0 ? rows[0] : null;
     }
