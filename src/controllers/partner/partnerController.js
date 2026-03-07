@@ -4,7 +4,11 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import levenshtein from 'fast-levenshtein';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'jservice_partner_secret_2026';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+    console.error('❌ ERREUR FATALE : JWT_SECRET est manquant dans le fichier .env. Arrêt du serveur.');
+    process.exit(1);
+}
 
 export const PartnerController = {
     /**
@@ -92,7 +96,12 @@ export const PartnerController = {
             if (!match) return res.status(401).json({ success: false, error: 'Identifiants invalides.' });
 
             const token = jwt.sign({ id: partner.id, role: 'partner' }, JWT_SECRET, { expiresIn: '7d' });
-            res.cookie('partner_token', token, { httpOnly: true, maxAge: 7 * 24 * 60 * 60 * 1000 });
+            res.cookie('partner_token', token, {
+                httpOnly: true,
+                secure: process.env.NODE_ENV === 'production',
+                sameSite: 'Lax',
+                maxAge: 7 * 24 * 60 * 60 * 1000
+            });
             res.json({ success: true });
         } catch (error) {
             res.status(500).json({ success: false, error: error.message });
@@ -423,10 +432,10 @@ export const PartnerController = {
                 const modalCode = new bootstrap.Modal(document.getElementById('modalCode'));
 
                 // --- Supabase Realtime Setup ---
-                const supabaseClient = supabase.createClient('${process.env.SUPABASE_URL}', '${process.env.SUPABASE_ANON_KEY}');
-                
-                // On s'abonne aux commissions et aux retraits liés à ce partenaire
+                // Les clés publiques sont récupérées depuis l'endpoint dédié (jamais interpolées ici)
                 const partnerId = '${partner.id}';
+                const { supabaseUrl, supabaseAnonKey } = await fetch('/api/config/public').then(r => r.json());
+                const supabaseClient = supabase.createClient(supabaseUrl, supabaseAnonKey);
 
                 const commissionChannel = supabaseClient.channel('partner_commissions')
                     .on('postgres_changes', { 

@@ -1,0 +1,88 @@
+version: "3.9"
+
+# ==============================================================
+# RÉSEAU INTERNE PARTAGÉ
+# Tous les conteneurs sur ce réseau peuvent se parler via leur
+# nom de service (ex: http://supabase-db:5432).
+# ==============================================================
+networks:
+  tiketmomo-net:
+    driver: bridge
+
+# ==============================================================
+# VOLUMES PERSISTANTS
+# ==============================================================
+volumes:
+  supabase-db-data:
+
+services:
+  # ------------------------------------------------------------
+  # 🗄️  BASE DE DONNÉES SUPABASE (PostgreSQL auto-hébergé)
+  # Si tu utilises Supabase Cloud, supprime ce bloc et adapte
+  # SUPABASE_URL dans .env pour pointer vers cloud.
+  # ------------------------------------------------------------
+  supabase-db:
+    image: supabase/postgres:15.1.1.41
+    container_name: supabase-db
+    restart: unless-stopped
+    networks:
+      - tiketmomo-net
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      # ⚠️  Change ce mot de passe avant toute mise en prod
+      POSTGRES_PASSWORD: your_strong_postgres_password
+    volumes:
+      - supabase-db-data:/var/lib/postgresql/data
+      # Décommente pour charger automatiquement ton schéma au 1er démarrage :
+      # - ./database/supabase_master_schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ------------------------------------------------------------
+  # 🚀  BACKEND TIKETMOMO (Node.js / Express)
+  # ------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tiketmomo-backend
+    restart: unless-stopped
+    networks:
+      - tiketmomo-net
+    ports:
+      # Expose le port 3000 du conteneur sur le port 3000 de la machine hôte
+      - "3000:3000"
+
+    # Les secrets sont lus depuis le fichier .env LOCAL (jamais dans l'image)
+    env_file:
+      - .env
+
+    # Surcharge les variables qui doivent pointer vers le réseau Docker
+    # (le backend parle à supabase-db via le nom de service Docker)
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # 👇 Remplace 127.0.0.1 par le nom du service Docker "supabase-db"
+      # SUPABASE_URL: http://supabase-db:8000   # décommente si tu utilises le Kong/API de Supabase local
+      # Pour un accès direct PostgreSQL (sans Supabase API) :
+      # DATABASE_URL: postgresql://postgres:your_strong_postgres_password@supabase-db:5432/postgres
+
+    # Le backend ne démarre qu'une fois la DB prête
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+
+    # Montage optionnel du fichier de clé Firebase (ne pas inclure dans l'image)
+    volumes:
+      - ./firebase-key.json:/app/firebase-key.json:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3

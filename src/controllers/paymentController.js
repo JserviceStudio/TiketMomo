@@ -11,6 +11,16 @@ export const PaymentController = {
     try {
       const { manager: managerId, amount, profile, mac, ip, pub_key } = req.query;
 
+      // 🛡️ HELPER Anti-XSS : échappe tous les caractères HTML dangereux
+      const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+
+      const sManagerId = esc(managerId);
+      const sAmount = esc(amount);
+      const sProfile = esc(profile);
+      const sMac = esc(mac);
+      const sIp = esc(ip);
+      const sPubKey = esc(pub_key);
+
       // 1. Validation de l'entrée (Zero-Trust)
       if (!managerId || !amount || !profile || !pub_key) {
         return res.status(400).send("Paramètres manquants ou invalides (pub_key requise).");
@@ -20,11 +30,11 @@ export const PaymentController = {
       // On sauvegarde ou on met à jour la Clé FedaPay du Gérant "A la volée"
       await supabaseAdmin
         .from('managers')
-        .update({ fedapay_public_key: pub_key })
-        .eq('id', managerId);
+        .update({ fedapay_public_key: sPubKey })
+        .eq('id', sManagerId);
 
       // 2. Vérification de la disponibilité du stock AVANT d'afficher le paiement
-      const stock = await VoucherModel.getAvailableVoucherCode(managerId, profile);
+      const stock = await VoucherModel.getAvailableVoucherCode(sManagerId, sProfile);
       if (!stock) {
         return res.status(200).send(`
           <html>
@@ -36,7 +46,7 @@ export const PaymentController = {
               <div style="max-width: 400px; margin: 0 auto; background: white; padding: 40px; border-radius: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.05);">
                   <h1 style="color: #EF4444; font-size: 4rem; margin: 0;">📦</h1>
                   <h2 style="margin-top: 20px;">Rupture de Stock</h2>
-                  <p style="color: #666; line-height: 1.6;">Désolé, il n'y a plus de tickets <strong>"${profile}"</strong> disponibles pour le moment.</p>
+                <p style="color: #666; line-height: 1.6;">Désolé, il n'y a plus de tickets <strong>"${sProfile}"</strong> disponibles pour le moment.</p>
                   <p style="font-size: 0.9rem; color: #999;">Le gérant a été automatiquement notifié pour le réapprovisionnement.</p>
                   <button onclick="window.location.reload()" style="margin-top: 30px; background: #673AB7; color: white; border: none; padding: 12px 30px; border-radius: 12px; font-weight: 600; cursor: pointer;">Réessayer</button>
               </div>
@@ -66,24 +76,24 @@ export const PaymentController = {
           <div class="loader"></div>
           <p>Veuillez patienter, vous allez être redirigé vers la page de paiement.</p>
           <script>
-            const publicKey = '${pub_key}'; 
+            const publicKey = ${JSON.stringify(sPubKey)};
             window.onload = function() {
               let widget = FedaPay.init({
                 public_key: publicKey,
                 transaction: {
-                  amount: ${amount},
-                  description: "Achat ticket WiFi - ${profile}",
+                  amount: ${parseInt(sAmount, 10) || 0},
+                  description: "Achat ticket WiFi - ${sProfile}",
                   custom_metadata: {
-                    manager_id: "${managerId}",
-                    profile: "${profile}",
-                    internal_tx_id: "${internalTxId}",
-                    client_mac: "${mac || 'unknown'}",
-                    client_ip: "${ip || 'unknown'}"
+                    manager_id: ${JSON.stringify(sManagerId)},
+                    profile: ${JSON.stringify(sProfile)},
+                    internal_tx_id: ${JSON.stringify(internalTxId)},
+                    client_mac: ${JSON.stringify(sMac || 'unknown')},
+                    client_ip: ${JSON.stringify(sIp || 'unknown')}
                   }
                 },
                 onComplete: function(response) {
                   if(response.reason === 'SUCCESS' || response.status === 'approved') {
-                    window.location.href = '/api/v1/payments/success?tx=' + "${internalTxId}" + "&mac=${mac || ''}&ip=${ip || ''}";
+                    window.location.href = '/api/v1/payments/success?tx=' + encodeURIComponent(${JSON.stringify(internalTxId)}) + '&mac=' + encodeURIComponent(${JSON.stringify(sMac || '')}) + '&ip=' + encodeURIComponent(${JSON.stringify(sIp || '')});
                   }
                 }
               });

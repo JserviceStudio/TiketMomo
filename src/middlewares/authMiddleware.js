@@ -62,7 +62,12 @@ export const requireAuth = async (req, res, next) => {
     }
 };
 import jwt from 'jsonwebtoken';
-const JWT_SECRET = process.env.JWT_SECRET || 'jservice_partner_secret_2026';
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+    console.error('❌ ERREUR FATALE : JWT_SECRET est manquant dans le fichier .env. Arrêt du serveur.');
+    process.exit(1);
+}
 
 /**
  * 🛡️ RÈGLE 2 : Middleware Partenaires (JWT Interne)

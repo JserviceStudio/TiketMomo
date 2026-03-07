@@ -65,6 +65,15 @@ app.get('/health', (req, res) => {
   res.status(200).json({ success: true, message: 'API is running' });
 });
 
+// Endpoint de configuration publique (clés non-sensibles pour le frontend)
+// Ne jamais exposer SUPABASE_SERVICE_ROLE_KEY ici.
+app.get('/api/config/public', (req, res) => {
+  res.status(200).json({
+    supabaseUrl: process.env.SUPABASE_URL,
+    supabaseAnonKey: process.env.SUPABASE_ANON_KEY
+  });
+});
+
 // Importation des gestionnaires de routes et d'erreur
 import { errorHandler, notFoundHandler } from './middlewares/errorHandler.js';
 import voucherRoutes from './routes/voucherRoutes.js';

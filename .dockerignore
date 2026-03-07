@@ -1,0 +1,40 @@
+# Dépendances (réinstallées dans l'image)
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# Secrets & credentiels (injectés via variables d'environnement ou volumes)
+.env
+.env.*
+firebase-key.json
+
+# Logs
+logs/
+*.log
+
+# Git
+.git/
+.gitignore
+
+# CI / éditeur / OS
+.github/
+.vscode/
+.DS_Store
+.mobilsouche/
+
+# Fichiers de dev/test non nécessaires en prod
+diagnose_dashboard.js
+simulate_data.js
+boost_data.js
+test-db.js
+scripts/
+
+# Docker lui-même
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Coverage / build
+coverage/
+dist/
+build/
