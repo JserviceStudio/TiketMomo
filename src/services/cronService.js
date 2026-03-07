@@ -67,20 +67,7 @@ export const CronService = {
 
                     if (timeLeft <= 0) continue;
 
-                    // Alerte à 30 Jours pour les licences potentiellement longues
-                    if (timeLeft <= THIRTY_DAYS_MS && !manager.notified_almost_expired) {
-                        await NotificationService.sendPushToManager(
-                            manager.id,
-                            '⚠️ Votre licence approche de sa fin',
-                            'Votre licence actuelle expirera dans moins de 30 jours. Pensez à la renouveler.',
-                            { type: 'LICENSE_EXPIRING_30', action: 'OPEN_LICENSE_TAB' }
-                        );
-
-                        await supabaseAdmin.from('managers').update({ notified_almost_expired: true }).eq('id', manager.id);
-                        continue;
-                    }
-
-                    // Alerte Critique à 10 Jours
+                    // ⚠️ Alerte Critique à 10 Jours - PRIORITÉ MAX (vérifiée EN PREMIER)
                     if (timeLeft <= TEN_DAYS_MS && !manager.notified_critical_expired) {
                         await NotificationService.sendPushToManager(
                             manager.id,
@@ -88,8 +75,17 @@ export const CronService = {
                             'Il vous reste moins de 10 jours avant la coupure de vos services SaaS. Renouvelez maintenant.',
                             { type: 'LICENSE_CRITICAL_10', action: 'OPEN_LICENSE_TAB' }
                         );
-
                         await supabaseAdmin.from('managers').update({ notified_critical_expired: true }).eq('id', manager.id);
+                    }
+                    // Alerte à 30 Jours (uniquement si pas encore en zone critique)
+                    else if (timeLeft <= THIRTY_DAYS_MS && !manager.notified_almost_expired) {
+                        await NotificationService.sendPushToManager(
+                            manager.id,
+                            '⚠️ Votre licence approche de sa fin',
+                            'Votre licence actuelle expirera dans moins de 30 jours. Pensez à la renouveler.',
+                            { type: 'LICENSE_EXPIRING_30', action: 'OPEN_LICENSE_TAB' }
+                        );
+                        await supabaseAdmin.from('managers').update({ notified_almost_expired: true }).eq('id', manager.id);
                     }
                 }
                 console.log('🔔 [CRON] Notifications d\'expiration traitées avec succès.');

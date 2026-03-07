@@ -40,7 +40,23 @@ app.use(helmet({
     },
   },
 })); // Protège les headers HTTP avec une CSP adaptée aux CDNs
-app.use(cors()); // Configure CORS
+// CORS — Origines autorisées uniquement (Zero-Trust)
+// Définir ALLOWED_ORIGINS dans .env : "https://monsite.com,https://app.monsite.com"
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',')
+  : ['http://localhost:3000', 'http://localhost:5173'];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Autorise les requêtes sans Origin (ex: curl, Postman, webhooks server-to-server)
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS: Origine non autorisée - ${origin}`));
+    }
+  },
+  credentials: true
+}));
 app.use(express.json()); // Parsing du JSON entrant (Stateless)
 app.use(morgan('combined')); // Logging HTTP structuré
 

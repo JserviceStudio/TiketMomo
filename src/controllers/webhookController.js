@@ -36,17 +36,27 @@ export const WebhookController = {
 
                     if (!userId || !internalTxId) return res.status(200).send('Missing internal license parameters.');
 
-                    // On vérifie (Idempotence) si cette transaction FedaPay est déjà exécutée
-                    const { data: existing, error: checkError } = await supabaseAdmin
-                        .from('transactions')
-                        .select('id')
-                        .eq('id', internalTxId)
-                        .limit(1);
+                    // L'admin a payé: Génération, écriture et mise à jour Supabase
+                    // 🛡️ IDÉMPOTENCE ATOMIQUE : on tente d'insérer la transaction d'abord.
+                    // Si FedaPay rejoue le webhook, la contrainte UNIQUE sur 'id'
+                    // rejettera le doublon avec le code d'erreur PostgreSQL 23505.
+                    const { error: licTxError } = await supabaseAdmin.from('transactions').insert([{
+                        id: internalTxId,
+                        manager_id: userId,
+                        amount: transaction.amount,
+                        status: 'PROCESSING',
+                        type: 'LIC_PURCHASE',
+                        metadata: { plan, duration: durationStr }
+                    }]);
 
-                    if (checkError) throw checkError;
-                    if (existing && existing.length > 0) return res.status(200).send('License already provided (Idempotent)');
+                    if (licTxError) {
+                        // Code 23505 = violation contrainte unique PostgreSQL→ déjà traité
+                        if (licTxError.code === '23505') {
+                            return res.status(200).send('License already provided (Idempotent)');
+                        }
+                        throw licTxError;
+                    }
 
-                    // L'admin a payé: Génération, écriture sur Firestore (avec le Plan) et mise à jour Supabase
                     await LicenseService.generateAndActivateLicense(userId, domain || 'jservice.cloud', internalTxId, transaction.amount, plan, parseInt(durationStr));
 
                     // 🛡️ AUDIT LOG IMMUTABLE (Stripe Style)
@@ -71,15 +81,23 @@ export const WebhookController = {
 
                 // 2. Transaction Supabase : Réserver un ticket & valider le paiement via RPC
                 try {
-                    // A- Vérifie d'abord si on l'a pas déjà traité (Idempotence)
-                    const { data: existingTx, error: txCheckError } = await supabaseAdmin
-                        .from('transactions')
-                        .select('id')
-                        .eq('id', internalTxId)
-                        .limit(1);
+                    // 🛡️ IDÉMPOTENCE ATOMIQUE : On tente d'insérer une transaction à l'état PROCESSING.
+                    // Si deux webhooks arrivent simultanément, la contrainte UNIQUE sur 'id'
+                    // garantit qu'un seul passera. Le second recevra le code 23505 et s'arrêtera.
+                    const { error: reserveError } = await supabaseAdmin.from('transactions').insert([{
+                        id: internalTxId,
+                        manager_id: managerId,
+                        amount: transaction.amount,
+                        status: 'PROCESSING',
+                        type: 'VOUCHER_SALE',
+                        metadata: { phone: 'hidden', mikrotik_status: 'PENDING' }
+                    }]);
 
-                    if (txCheckError) throw txCheckError;
-                    if (existingTx && existingTx.length > 0) return res.status(200).send('Already processed');
+                    // Code 23505 = violation contrainte unique PostgreSQL → déjà traité
+                    if (reserveError) {
+                        if (reserveError.code === '23505') return res.status(200).send('Already processed');
+                        throw reserveError;
+                    }
 
                     // B- Trouver et verrouiller un ticket Libre (RPC PostgreSQL SKIP LOCKED)
                     const { data: freeVouchers, error: rpcError } = await supabaseAdmin.rpc('get_next_voucher', {
@@ -90,15 +108,11 @@ export const WebhookController = {
                     if (rpcError) throw rpcError;
 
                     if (!freeVouchers || freeVouchers.length === 0) {
-                        // Rupture de stock critique ! 
-                        await supabaseAdmin.from('transactions').insert([{
-                            id: internalTxId,
-                            manager_id: managerId,
-                            amount: transaction.amount,
-                            status: 'FAILED',
-                            type: 'VOUCHER_SALE',
-                            metadata: { phone: 'hidden', mikrotik_status: 'PENDING' }
-                        }]);
+                        // Rupture de stock critique ! On met à jour la transaction (déjà insérée à l'état PROCESSING)
+                        await supabaseAdmin
+                            .from('transactions')
+                            .update({ status: 'FAILED' })
+                            .eq('id', internalTxId);
 
                         // 🚩 LOG ET ALERTE ADMIN
                         await MonitoringService.logError('PAYMENT_STOCK', `Rupture critique pour prix ${transaction.amount}`, {
@@ -118,18 +132,17 @@ export const WebhookController = {
                         .update({ sale_id: internalTxId }) // sale_id dans le schéma
                         .eq('id', ticketId);
 
-                    // D- Insérer la transaction comme SUCCESS
-                    const { error: insertError } = await supabaseAdmin.from('transactions').insert([{
-                        id: internalTxId,
-                        manager_id: managerId,
-                        amount: transaction.amount,
-                        status: 'SUCCESS',
-                        type: 'VOUCHER_SALE',
-                        voucher_id: ticketId,
-                        metadata: { phone: 'hidden', mikrotik_status: 'PENDING' }
-                    }]);
+                    // D- Mettre la transaction à jour en SUCCESS (déjà insérée à l'état PROCESSING)
+                    const { error: updateError } = await supabaseAdmin
+                        .from('transactions')
+                        .update({
+                            status: 'SUCCESS',
+                            voucher_id: ticketId,
+                            metadata: { phone: 'hidden', mikrotik_status: 'PENDING' }
+                        })
+                        .eq('id', internalTxId);
 
-                    if (insertError) throw insertError;
+                    if (updateError) throw updateError;
 
                     // 🛡️ AUDIT LOG IMMUTABLE (Stripe Style)
                     await MonitoringService.logAudit({

@@ -1,6 +1,10 @@
 import pino from 'pino';
 import fs from 'fs';
 import { NotificationService } from '../notificationService.js';
+import { supabaseAdmin } from '../../config/supabase.js';
+
+// Garantit que le dossier logs/ existe (sécurise le démarrage en Docker/fresh env) [M2]
+fs.mkdirSync('./logs', { recursive: true });
 
 // Configuration du transport multisortie (Console + Fichier)
 const streams = [
@@ -25,9 +29,6 @@ export const MonitoringService = {
      */
     async logAudit({ managerId, actionType, resourceId, severity = 'LOW', details = {}, req = null }) {
         try {
-            const supabaseModule = await import('../../config/supabase.js');
-            const supabaseAdmin = supabaseModule.supabaseAdmin;
-
             const { error } = await supabaseAdmin.from('audit_logs').insert([{
                 user_id: managerId || null, // Dans le schéma SQL 'user_id'
                 action: actionType,         // Dans le schéma SQL 'action'

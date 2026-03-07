@@ -86,7 +86,7 @@ export const PartnerController = {
             const { email, password } = req.body;
             const { data: partner, error } = await supabaseAdmin
                 .from('resellers')
-                .select('*')
+                .select('id, name, email, password, phone, promo_code, commission_rate, balance')
                 .eq('email', email)
                 .single();
 
@@ -467,7 +467,7 @@ export const PartnerController = {
 
                 async function submitChangeCode() {
                     const newCode = document.getElementById('newCodeInput').value;
-                    const res = await fetch('/api/v1/partners/profile/promo-code', {
+                    const res = await fetch('/partners/api/profile/promo-code', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ newCode })
