@@ -1,6 +1,7 @@
 import { VoucherModel } from '../models/voucherModel.js';
 import { FedaPayService } from '../services/fedapayService.js';
 import { supabaseAdmin } from '../config/supabase.js';
+import crypto from 'crypto';
 
 export const PaymentController = {
   /**
@@ -30,7 +31,7 @@ export const PaymentController = {
       // On sauvegarde ou on met à jour la Clé FedaPay du Gérant "A la volée"
       await supabaseAdmin
         .from('managers')
-        .update({ fedapay_public_key: sPubKey })
+        .update({ fedapay_p_key: sPubKey })
         .eq('id', sManagerId);
 
       // 2. Vérification de la disponibilité du stock AVANT d'afficher le paiement
@@ -56,7 +57,7 @@ export const PaymentController = {
       }
 
       // 3. Rendu de la page de paiement FedaPay
-      const internalTxId = `TX_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      const internalTxId = `TX_${crypto.randomUUID()}`;
 
       const htmlContent = `
         <!DOCTYPE html>
@@ -119,12 +120,10 @@ export const PaymentController = {
     try {
       const { tx, mac, ip } = req.query;
 
-      // 1. Chercher la transaction validée et le code associé dans Supabase
+      // 1. Chercher la transaction validée et le code associé dans Supabase (JOIN Relationnel)
       const { data: transactions, error } = await supabaseAdmin
         .from('transactions')
-        .select(`
-            vouchers (username)
-          `)
+        .select('id, amount, vouchers(code)')
         .eq('id', tx)
         .eq('status', 'SUCCESS')
         .limit(1);
@@ -141,7 +140,7 @@ export const PaymentController = {
          `);
       }
 
-      const code = transactions[0].vouchers?.username;
+      const code = transactions[0].vouchers?.code || 'ERR_NO_CODE';
 
       // 2. Rendu de la page de Succès + Script Auto-Login
       const htmlContent = `

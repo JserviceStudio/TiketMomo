@@ -33,9 +33,10 @@ create table if not exists vouchers (
     price decimal(10,2) not null,
     code text not null,
     used boolean default false,
-    sale_id uuid,
+    sale_id text, -- Changé en text pour supporter TX_ prefixes
     metadata jsonb default '{}',
-    created_at timestamptz default now()
+    created_at timestamptz default now(),
+    unique(code, manager_id) -- Support pour upsert idempotent
 );
 alter table vouchers enable row level security;
 create index if not exists idx_vouchers_manager_id on vouchers(manager_id);
@@ -49,6 +50,7 @@ create table if not exists transactions (
     amount decimal(10,2) not null,
     status text not null,
     type text,
+    voucher_id uuid references vouchers(id) on delete set null, -- Pour le JOIN relationnel
     metadata jsonb default '{}',
     created_at timestamptz default now()
 );

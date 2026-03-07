@@ -30,11 +30,10 @@ export const MonitoringService = {
     async logAudit({ managerId, actionType, resourceId, severity = 'LOW', details = {}, req = null }) {
         try {
             const { error } = await supabaseAdmin.from('audit_logs').insert([{
-                user_id: managerId || null, // Dans le schéma SQL 'user_id'
-                action: actionType,         // Dans le schéma SQL 'action'
-                entity_type: severity,      // On recycle severity sur entity_type ou on l'ajoute
+                user_id: managerId || null,
+                action: actionType,
                 entity_id: resourceId || null,
-                details: details,
+                details: { ...details, severity },
                 ip_address: req ? (req.headers['x-forwarded-for'] || req.socket.remoteAddress) : 'SERVER-INTERNAL'
             }]);
 

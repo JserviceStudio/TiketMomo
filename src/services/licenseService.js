@@ -7,7 +7,11 @@ export const LicenseService = {
      * Format: TKMO-PLAN-XXXXX-XXXXX-XXXXX
      */
     generateEnterpriseKey(plan) {
-        const generateBlock = () => crypto.randomBytes(2).toString('hex').toUpperCase().padStart(5, '0');
+        // Bloc de 5 caractères majuscules aléatoires (Alphanumérique safe)
+        const generateBlock = () => crypto.randomBytes(10)
+            .toString('base64')
+            .replace(/[^A-Z0-9]/g, '')
+            .substring(0, 5);
         // Raccourci de plan pour la clé (ex: VENTE -> VTE)
         const planPrefix = plan === 'VENTE' ? 'VTE' : plan;
         return `TKMO-${planPrefix}-${generateBlock()}-${generateBlock()}-${generateBlock()}`;
@@ -46,9 +50,8 @@ export const LicenseService = {
         const ONE_MONTH_MS = 30.44 * 24 * 60 * 60 * 1000;
         const expiryDate = Date.now() + (ONE_MONTH_MS * durationMonths);
 
-        // 2. Note: Auparavant, nous utilisions Firebase Firestore ici.
-        // Avec Supabase, les licences sont gérées directement via la table 'saas_licenses' ou 'managers'.
-        console.log(`[License Service] 🚀 Licence ${plan} (${durationMonths} Mois) générée pour l'UID: ${userId}`);
+        // With Supabase, licenses are managed directly in the 'managers' table.
+        console.log(`[License Service] 🚀 Licence ${plan} (${durationMonths} Mois) générée.`);
 
         // 3. Mise à jour de notre base locale (Table managers & transactions) avec Supabase
         try {

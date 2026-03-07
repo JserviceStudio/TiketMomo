@@ -5,6 +5,22 @@ import morgan from 'morgan';
 import dotenv from 'dotenv';
 import pino from 'pino';
 import rateLimit from 'express-rate-limit';
+import cookieParser from 'cookie-parser';
+import { errorHandler, notFoundHandler } from './middlewares/errorHandler.js';
+
+// Importation des routes
+import voucherRoutes from './routes/voucherRoutes.js';
+import paymentRoutes from './routes/paymentRoutes.js';
+import webhookRoutes from './routes/webhookRoutes.js';
+import managerRoutes from './routes/managerRoutes.js';
+import salesRoutes from './routes/salesRoutes.js';
+import licenseRoutes from './routes/licenseRoutes.js';
+import reportRoutes from './routes/reportRoutes.js';
+import adminRoutes from './routes/admin/adminRoutes.js';
+import partnerRoutes from './routes/partner/partnerRoutes.js';
+
+// Services
+import { CronService } from './services/cronService.js';
 
 // Variables d'environnement
 dotenv.config();
@@ -19,9 +35,6 @@ const logger = pino({
 });
 
 const app = express();
-
-import cookieParser from 'cookie-parser';
-import partnerRoutes from './routes/partner/partnerRoutes.js';
 
 // Configuration des fichiers statiques
 app.use(express.static('public'));
@@ -57,7 +70,14 @@ app.use(cors({
   },
   credentials: true
 }));
-app.use(express.json()); // Parsing du JSON entrant (Stateless)
+app.use(express.json({
+  verify: (req, res, buf) => {
+    // Nécessaire pour la vérification de signature HMAC des webhooks
+    if (req.originalUrl?.startsWith('/api/v1/webhooks/')) {
+      req.rawBody = buf.toString('utf8');
+    }
+  }
+})); // Parsing du JSON entrant (Stateless)
 app.use(morgan('combined')); // Logging HTTP structuré
 
 // Rate Limiting (API Throttling - Sécurité Zero-Trust)
@@ -90,17 +110,6 @@ app.get('/api/config/public', (req, res) => {
   });
 });
 
-// Importation des gestionnaires de routes et d'erreur
-import { errorHandler, notFoundHandler } from './middlewares/errorHandler.js';
-import voucherRoutes from './routes/voucherRoutes.js';
-import paymentRoutes from './routes/paymentRoutes.js';
-import webhookRoutes from './routes/webhookRoutes.js';
-import managerRoutes from './routes/managerRoutes.js';
-import salesRoutes from './routes/salesRoutes.js';
-import licenseRoutes from './routes/licenseRoutes.js';
-import reportRoutes from './routes/reportRoutes.js';
-import adminRoutes from './routes/admin/adminRoutes.js';
-
 // 🔌 Branchement des routes métiers avec versionnement (Google API Design)
 app.use('/admin', adminRoutes); // Interface de gestion Administrative
 app.use('/api/v1/licenses', licenseRoutes); // Vente de licences SaaS
@@ -119,7 +128,6 @@ app.use(notFoundHandler);
 app.use(errorHandler);
 
 // 🧹 Lancement des tâches planifiées en arrière-plan
-import { CronService } from './services/cronService.js';
 if (process.env.NODE_ENV !== 'test') { // Ne pas lancer pendant les tests unitaires
   CronService.startCleanupTask();
   CronService.startLicenseMonitorTask(); // 🔔 Push Monitor SaaS

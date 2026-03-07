@@ -1,7 +1,9 @@
 import express from 'express';
 import { AdminController } from '../../controllers/admin/adminController.js';
+import { requireAdminAuth } from '../../middlewares/authMiddleware.js';
 
 const router = express.Router();
+router.use(requireAdminAuth);
 
 /**
  * 🔒 IMPORTANT : En production, vous devriez protéger cette route

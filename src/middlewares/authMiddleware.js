@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import { supabase, supabaseAdmin } from '../config/supabase.js';
 
 /**
@@ -61,7 +63,14 @@ export const requireAuth = async (req, res, next) => {
         });
     }
 };
-import jwt from 'jsonwebtoken';
+
+const safeCompare = (left, right) => {
+    if (typeof left !== 'string' || typeof right !== 'string') return false;
+    const leftBuffer = Buffer.from(left);
+    const rightBuffer = Buffer.from(right);
+    if (leftBuffer.length !== rightBuffer.length) return false;
+    return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+};
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -86,4 +95,43 @@ export const requirePartnerAuth = async (req, res, next) => {
     } catch (error) {
         return res.status(401).send('<script>window.location.href="/partners/auth";</script>');
     }
+};
+
+/**
+ * 🔒 Middleware d'authentification Admin (Token serveur uniquement)
+ */
+export const requireAdminAuth = (req, res, next) => {
+    const configuredToken = process.env.ADMIN_DASHBOARD_TOKEN;
+
+    if (!configuredToken) {
+        return res.status(500).json({
+            success: false,
+            error: {
+                code: 'ADMIN_AUTH_NOT_CONFIGURED',
+                message: 'ADMIN_DASHBOARD_TOKEN est manquant côté serveur.'
+            }
+        });
+    }
+
+    const authHeader = req.headers.authorization;
+    const bearerToken = authHeader?.startsWith('Bearer ')
+        ? authHeader.split(' ')[1]
+        : null;
+
+    const providedTokenHeader = req.headers['x-admin-token'];
+    const providedToken = Array.isArray(providedTokenHeader)
+        ? providedTokenHeader[0]
+        : (providedTokenHeader || bearerToken);
+
+    if (!safeCompare(providedToken, configuredToken)) {
+        return res.status(401).json({
+            success: false,
+            error: {
+                code: 'UNAUTHORIZED_ADMIN',
+                message: 'Accès admin refusé.'
+            }
+        });
+    }
+
+    return next();
 };

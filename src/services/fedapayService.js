@@ -6,17 +6,23 @@ export const FedaPayService = {
      * Valide que le Webhook provient bien de FedaPay
      */
     verifySignature(payload, signatureHeader) {
-        if (process.env.NODE_ENV === 'development') return true; // Contournement pour les tests locaux
+        if (process.env.NODE_ENV === 'development') return true;
 
         const secret = process.env.FEDAPAY_WEBHOOK_SECRET;
         if (!secret || !signatureHeader) return false;
 
-        // FedaPay utilise HMAC SHA256 avec le body brut (raw text)
+        // FedaPay peut envoyer v1=hash,v0=hash... On cherche v1
+        const parts = signatureHeader.split(',');
+        const v1 = parts.find(p => p.startsWith('v1='))?.split('=')[1];
+
+        // Si le header est brut (sans v1=), on prend la valeur entière comme signature
+        const signature = v1 || signatureHeader;
+
         const hash = crypto.createHmac('sha256', secret)
             .update(payload)
             .digest('hex');
 
-        return hash === signatureHeader;
+        return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(signature));
     },
 
     /**

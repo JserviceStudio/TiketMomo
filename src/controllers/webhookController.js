@@ -17,6 +17,22 @@ export const WebhookController = {
                 return res.status(503).send('Service Temporarily Overloaded (Circuit Open). Try again later.');
             }
 
+            const rawSignatureHeader =
+                req.headers['x-fedapay-signature'] ||
+                req.headers['x-signature'] ||
+                req.headers.signature;
+            const signatureHeader = Array.isArray(rawSignatureHeader)
+                ? rawSignatureHeader[0]
+                : rawSignatureHeader;
+            const rawPayload = req.rawBody || JSON.stringify(req.body || {});
+
+            if (!FedaPayService.verifySignature(rawPayload, signatureHeader)) {
+                await MonitoringService.logError('FEDAPAY_SIGNATURE_INVALID', 'Signature webhook invalide.', {
+                    severity: 'HIGH'
+                });
+                return res.status(401).send('Invalid webhook signature');
+            }
+
             const event = req.body;
 
             // On ne traite que les paiements validés
