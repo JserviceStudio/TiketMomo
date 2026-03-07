@@ -1,4 +1,4 @@
-import pool from '../config/db.js';
+import { supabaseAdmin } from '../config/supabase.js';
 
 export const ReportController = {
     /**
@@ -14,19 +14,18 @@ export const ReportController = {
                 return res.status(400).json({ success: false, message: "Données de rapport incomplètes." });
             }
 
-            const sql = `
-                INSERT INTO sales_reports (manager_id, app_id, report_date, total_sales, total_transactions, raw_data)
-                VALUES (?, ?, ?, ?, ?, ?)
-            `;
+            const { error } = await supabaseAdmin
+                .from('sales_reports')
+                .insert([{
+                    manager_id: managerId,
+                    app_id,
+                    report_date: report_date || new Date().toISOString().split('T')[0],
+                    total_sales,
+                    total_transactions: total_transactions || 0,
+                    raw_data: raw_data || {}
+                }]);
 
-            await pool.execute(sql, [
-                managerId,
-                app_id,
-                report_date || new Date().toISOString().split('T')[0],
-                total_sales,
-                total_transactions || 0,
-                JSON.stringify(raw_data || {})
-            ]);
+            if (error) throw error;
 
             res.status(201).json({
                 success: true,
@@ -46,18 +45,21 @@ export const ReportController = {
             const managerId = req.user.manager_id;
             const { app_id } = req.query;
 
-            let sql = "SELECT * FROM sales_reports WHERE manager_id = ? ";
-            const params = [managerId];
+            let query = supabaseAdmin
+                .from('sales_reports')
+                .select('*')
+                .eq('manager_id', managerId)
+                .order('report_date', { ascending: false })
+                .limit(50);
 
             if (app_id) {
-                sql += " AND app_id = ? ";
-                params.push(app_id);
+                query = query.eq('app_id', app_id);
             }
 
-            sql += " ORDER BY report_date DESC LIMIT 50";
+            const { data, error } = await query;
+            if (error) throw error;
 
-            const [rows] = await pool.execute(sql, params);
-            res.status(200).json({ success: true, data: rows });
+            res.status(200).json({ success: true, data });
         } catch (error) {
             next(error);
         }

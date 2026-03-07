@@ -1,4 +1,4 @@
-# 🛠️ Architecture & Security Rules: TiketMomo Backend (Enterprise-Grade)
+# 🛠️ Architecture & Security Rules: J+SERVICE Backend (Enterprise-Grade)
 
 **Objectif :** Développer un backend Multi-Tenant ultra-sécurisé, performant et résilient pour la gestion de vouchers Wi-Fi via MikroTik. Ce document fusionne vos exigences avec les standards de l'industrie issus de Google, Amazon (AWS), Meta (Facebook) et WhatsApp.
 

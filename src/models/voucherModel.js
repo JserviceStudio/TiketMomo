@@ -1,4 +1,4 @@
-import pool from '../config/db.js';
+import { supabaseAdmin } from '../config/supabase.js';
 
 export const VoucherModel = {
     /**
@@ -8,30 +8,34 @@ export const VoucherModel = {
     async bulkInsert(managerId, siteId, vouchers) {
         if (!vouchers || vouchers.length === 0) return 0;
 
-        // Préparation de la requête pour insertion multiple
-        // 🌟 FIX : Insertion de la colonne 'profile'
-        const sql = `
-      INSERT IGNORE INTO vouchers 
-      (id, manager_id, site_id, profile, code, price, duration_minutes, used, created_at) 
-      VALUES ?
-    `;
+        // Transformation des données (Mapping) pour Supabase
+        const values = vouchers.map((v) => ({
+            manager_id: managerId,
+            profile: v.profile || 'default',
+            code: v.username,
+            price: v.price || 0,
+            used: false,
+            metadata: {
+                site_id: siteId || 'default',
+                password: v.password || '',
+                duration_minutes: v.duration || 0
+            },
+            created_at: new Date(v.generatedAt || Date.now()).toISOString()
+        }));
 
-        // Transformation des données (Mapping)
-        const values = vouchers.map((v) => [
-            `${managerId}_${siteId}_${v.username}`, // Génération ID Composite
-            managerId, // 🛡️ ISOLATION STRICTE
-            siteId,
-            v.profile || 'default', // 🔔 Correction : Récupération du profil envoyé par l'app
-            v.username, // Le code du voucher affiché
-            v.price,
-            v.duration || 0, // duration_minutes
-            false, // used: non utilisé
-            new Date(v.generatedAt)
-        ]);
+        // Exécution optimisée via le SDK Supabase avec onConflict pour imiter INSERT IGNORE
+        try {
+            const { data, error } = await supabaseAdmin
+                .from('vouchers')
+                .upsert(values, { onConflict: 'code,manager_id', ignoreDuplicates: true })
+                .select();
 
-        // Exécution optimisée via le Pool
-        const [result] = await pool.query(sql, [values]);
-        return result.affectedRows; // Nombre de tickets réellement insérés (les doublons sont ignorés)
+            if (error) throw error;
+            return data ? data.length : 0;
+        } catch (err) {
+            console.error('[VoucherModel] BulkInsert Error:', err.message);
+            return 0;
+        }
     },
 
     /**
@@ -39,11 +43,20 @@ export const VoucherModel = {
      * Utilisé avant d'afficher la page de paiement FedaPay.
      */
     async getAvailableVoucherCode(managerId, profile) {
-        // 🌟 FIX : Recherche filtrée strictement par profil
-        const [rows] = await pool.execute(
-            `SELECT id, code FROM vouchers WHERE manager_id = ? AND profile = ? AND used = 0 LIMIT 1`,
-            [managerId, profile]
-        );
-        return rows.length > 0 ? rows[0] : null;
+        // Recherche filtrée strictement par profil via Supabase
+        const { data, error } = await supabaseAdmin
+            .from('vouchers')
+            .select('id, code')
+            .eq('manager_id', managerId)
+            .eq('profile', profile)
+            .eq('used', false)
+            .limit(1);
+
+        if (error) {
+            console.error('[VoucherModel] Error Fetching Available Codes:', error.message);
+            return null;
+        }
+
+        return data && data.length > 0 ? data[0] : null;
     }
 };

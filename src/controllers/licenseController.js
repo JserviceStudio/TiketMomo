@@ -1,10 +1,10 @@
 import crypto from 'crypto';
+import { supabaseAdmin } from '../config/supabase.js';
 
 export const LicenseController = {
   /**
    * GET /api/v1/licenses/buy
    * Page de Checkout pour l'achat de la Licence.
-   * Redirigé depuis l'application avec : /api/v1/licenses/buy?uid=USER_ID&domain=partner.com&plan=VIP&duration=12
    */
   async renderLicenseCheckout(req, res, next) {
     try {
@@ -19,19 +19,34 @@ export const LicenseController = {
         return res.status(400).send("Durée invalide. Choisissez : 1 (Mensuel), 12 (Annuel), 24 (Bi-Annuel).");
       }
 
-      // 💳 Tarification Dynamique (Prix de base pour 1 MOIS)
-      const BASE_PRICES = {
-        'PRO': 2000,
-        'VENTE': 3000,
-        'VPN': 5000,
-        'VIP': 8000
-      };
+      // 🛡️ Vérification Mode Maintenance depuis Supabase
+      const { data: maintSettings, error: maintError } = await supabaseAdmin
+        .from('system_settings')
+        .select('setting_value')
+        .eq('setting_key', 'maintenance_mode')
+        .single();
+
+      if (!maintError && maintSettings && JSON.parse(maintSettings.setting_value) === true) {
+        return res.status(503).send("<h1>🔧 Maintenance en cours</h1><p>Le service de paiement est temporairement indisponible. Réessayez dans quelques minutes.</p>");
+      }
+
+      // 💳 Tarification Dynamique (Chargée depuis Supabase)
+      const { data: pricingSettings, error: pricingError } = await supabaseAdmin
+        .from('system_settings')
+        .select('setting_value')
+        .eq('setting_key', 'saas_pricing')
+        .single();
+
+      let basePrices = { 'PRO': 2000, 'VENTE': 3000, 'VPN': 5000, 'VIP': 8000 }; // Fallback
+      if (!pricingError && pricingSettings) {
+        basePrices = JSON.parse(pricingSettings.setting_value);
+      }
 
       const selectedPlan = plan.toUpperCase();
-      const basePrice = BASE_PRICES[selectedPlan];
+      const basePrice = basePrices[selectedPlan];
 
       if (!basePrice) {
-        return res.status(400).send("Plan invalide. Choisissez parmi : PRO, VENTE, VPN, VIP.");
+        return res.status(400).send("Plan invalide ou non configuré.");
       }
 
       // Calcul du montant final (avec réduction possible sur la durée)
@@ -61,20 +76,19 @@ export const LicenseController = {
           <h2>Connexion à la passerelle de paiement...</h2>
           <div class="loader"></div>
           <p>Préparation de l'achat de votre licence <strong>${selectedPlan} (${duration} Mois)</strong>.</p>
-
           <script>
             window.onload = function() {
               let widget = FedaPay.init({
                 public_key: '${adminPublicKey}',
                 transaction: {
                   amount: ${licensePrice},
-                  description: "Achat Licence SaaS TiketMomo - Plan ${selectedPlan} (${duration} Mois)",
+                  description: "Achat Licence SaaS J+SERVICE - Plan ${selectedPlan} (${duration} Mois)",
                   custom_metadata: {
-                    type: "LICENSE_PURCHASE", // 🛡️ Permet au Webhook de le distinguer
+                    type: "LICENSE_PURCHASE",
                     user_id: "${uid}",
                     domain: "${domain}",
                     plan: "${selectedPlan}",
-                    duration: "${duration}", // 🚀 Transmission de la durée au Webhook
+                    duration: "${duration}",
                     internal_tx_id: "${internalTxId}"
                   }
                 },

@@ -1,34 +1,34 @@
 import cron from 'node-cron';
-import admin from 'firebase-admin';
-import pool from '../config/db.js';
+import { supabaseAdmin } from '../config/supabase.js';
 import { NotificationService } from './notificationService.js';
 
 export const CronService = {
     /**
      * 🧹 Nettoyage Automatique de la Base de Données (Règle 4 : Performance NVMe)
-     * L'application Mobile supprime les tickets du routeur après 3 jours.
      * Le Backend doit s'aligner et vider sa table 'vouchers' des tickets vendus (+ de 3 jours)
-     * pour que les recherches restent en-dessous de 5 millisecondes pour l'éternité.
+     * pour maintenir des performances optimales.
      */
     startCleanupTask() {
         // S'exécute tous les jours à 03:00 du matin
         cron.schedule('0 3 * * *', async () => {
             console.log('🧹 [CRON] Début du nettoyage des tickets expirés...');
             try {
-                // Supprime les tickets vendus (used = 1) dont la dernière mise à jour
-                // (date d'achat) remonte à plus de 3 jours.
-                const [result] = await pool.execute(`
-          DELETE FROM vouchers 
-          WHERE used = 1 
-          AND updated_at < DATE_SUB(NOW(), INTERVAL 3 DAY)
-        `);
+                // Supprime les tickets vendus (used = true) dont le dernier achat 
+                // remonte à plus de 3 jours.
+                const threeDaysAgo = new Date();
+                threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
 
-                console.log(`🧹 [CRON] Nettoyage terminé. ${result.affectedRows} tickets obsolètes supprimés selon la règle des 3 jours.`);
+                const { data, error, count } = await supabaseAdmin
+                    .from('vouchers')
+                    .delete({ count: 'exact' })
+                    .eq('used', true)
+                    .lt('updated_at', threeDaysAgo.toISOString());
 
-                // Note: La Data Financière est préservée grâce à la clause 
-                // FOREIGN KEY (voucher_id) ON DELETE SET NULL dans la table `transactions`.
+                if (error) throw error;
+
+                console.log(`🧹 [CRON] Nettoyage terminé. ${count || 0} tickets obsolètes supprimés selon la règle des 3 jours.`);
             } catch (error) {
-                console.error('❌ [CRON] Erreur pendant le nettoyage MySQL:', error);
+                console.error('❌ [CRON] Erreur pendant le nettoyage Supabase:', error.message);
             }
         });
 
@@ -44,49 +44,57 @@ export const CronService = {
         cron.schedule('0 9 * * *', async () => {
             console.log('🔔 [CRON] Vérification des licences expirant bientôt...');
             try {
-                const db = admin.firestore();
-                const now = Date.now();
+                const now = new Date();
+                const nowMs = now.getTime();
                 const TEN_DAYS_MS = 10 * 24 * 60 * 60 * 1000;
                 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
-                // On récupère toutes les licences actives
-                const snapshot = await db.collection('saas_licenses').where('status', '==', 'USED').get();
+                // On récupère les managers dont la licence approche
+                // Note: Dans l'écosystème migré, on utilise 'managers' ou une table 'saas_licenses' dédiée.
+                // Ici on assume que les données de licence sont dans 'managers' (au vu du schema.sql et LicenseService).
+                const { data: managers, error } = await supabaseAdmin
+                    .from('managers')
+                    .select('id, email, license_key, license_expiry_date, notified_almost_expired, notified_critical_expired')
+                    .not('license_key', 'is', null);
 
-                for (const doc of snapshot.docs) {
-                    const data = doc.data();
-                    const timeLeft = data.expiryDate - now;
+                if (error) throw error;
 
-                    // Ignorer les licences déjà expirées (seront gérées par un autre process)
+                for (const manager of managers) {
+                    if (!manager.license_expiry_date) continue;
+
+                    const expiryDate = new Date(manager.license_expiry_date).getTime();
+                    const timeLeft = expiryDate - nowMs;
+
                     if (timeLeft <= 0) continue;
 
-                    // Si c'est une licence de 12 mois ou plus -> Alerte à 30 Jours
-                    if (data.duration >= 12 && timeLeft <= THIRTY_DAYS_MS && !data.notifiedAlmostExpired) {
+                    // Alerte à 30 Jours pour les licences potentiellement longues
+                    if (timeLeft <= THIRTY_DAYS_MS && !manager.notified_almost_expired) {
                         await NotificationService.sendPushToManager(
-                            data.usedBy,
+                            manager.id,
                             '⚠️ Votre licence approche de sa fin',
                             'Votre licence actuelle expirera dans moins de 30 jours. Pensez à la renouveler.',
                             { type: 'LICENSE_EXPIRING_30', action: 'OPEN_LICENSE_TAB' }
                         );
-                        // Marquer comme notifié
-                        await doc.ref.update({ notifiedAlmostExpired: true });
+
+                        await supabaseAdmin.from('managers').update({ notified_almost_expired: true }).eq('id', manager.id);
                         continue;
                     }
 
-                    // Pour TOUTES les licences (Même 1 mois) -> Alerte Critique à 10 Jours
-                    if (timeLeft <= TEN_DAYS_MS && !data.notifiedCriticalExpired) {
+                    // Alerte Critique à 10 Jours
+                    if (timeLeft <= TEN_DAYS_MS && !manager.notified_critical_expired) {
                         await NotificationService.sendPushToManager(
-                            data.usedBy,
+                            manager.id,
                             '🚨 Licence bientôt expirée !',
                             'Il vous reste moins de 10 jours avant la coupure de vos services SaaS. Renouvelez maintenant.',
                             { type: 'LICENSE_CRITICAL_10', action: 'OPEN_LICENSE_TAB' }
                         );
-                        // Marquer comme notifié urgemment
-                        await doc.ref.update({ notifiedCriticalExpired: true });
+
+                        await supabaseAdmin.from('managers').update({ notified_critical_expired: true }).eq('id', manager.id);
                     }
                 }
                 console.log('🔔 [CRON] Notifications d\'expiration traitées avec succès.');
             } catch (error) {
-                console.error('❌ [CRON] Erreur vérification licences:', error);
+                console.error('❌ [CRON] Erreur vérification licences Supabase:', error.message);
             }
         });
         console.log('⏱️ [CRON] Moniteur de Licence planifié (Tous les jours à 9h00).');

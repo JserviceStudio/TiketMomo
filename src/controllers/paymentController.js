@@ -1,12 +1,11 @@
 import { VoucherModel } from '../models/voucherModel.js';
 import { FedaPayService } from '../services/fedapayService.js';
-import pool from '../config/db.js';
+import { supabaseAdmin } from '../config/supabase.js';
 
 export const PaymentController = {
   /**
    * GET /pay
    * Page de Checkout Hébergée par notre Backend (Server-Side Rendering minimaliste)
-   * Le routeur redirige ici : /pay?manager=GERANT_UID&amount=100&profile=100F-6H&mac=XX&ip=YY&pub_key=pk_live_XXX
    */
   async renderCheckoutPage(req, res, next) {
     try {
@@ -19,13 +18,12 @@ export const PaymentController = {
 
       // 1.5 APPRENTISSAGE AUTOMATIQUE (Auto-Configuration SaaS)
       // On sauvegarde ou on met à jour la Clé FedaPay du Gérant "A la volée"
-      await pool.execute(
-        `UPDATE managers SET fedapay_public_key = ? WHERE id = ? AND (fedapay_public_key IS NULL OR fedapay_public_key != ?)`,
-        [pub_key, managerId, pub_key]
-      );
+      await supabaseAdmin
+        .from('managers')
+        .update({ fedapay_public_key: pub_key })
+        .eq('id', managerId);
 
       // 2. Vérification de la disponibilité du stock AVANT d'afficher le paiement
-      // (Performance NVMe : lecture ultra-rapide avec l'index composite)
       const stock = await VoucherModel.getAvailableVoucherCode(managerId, profile);
       if (!stock) {
         return res.status(200).send(`
@@ -47,8 +45,7 @@ export const PaymentController = {
         `);
       }
 
-      // 3. Rendu de la page de paiement FedaPay (Redirection/Ouverture Automatique)
-      // On génère un identifiant de transaction interne (Idempotence - Règle 2)
+      // 3. Rendu de la page de paiement FedaPay
       const internalTxId = `TX_${Date.now()}_${Math.random().toString(36).substring(7)}`;
 
       const htmlContent = `
@@ -68,13 +65,8 @@ export const PaymentController = {
           <h2>Connexion sécurisée à FedaPay...</h2>
           <div class="loader"></div>
           <p>Veuillez patienter, vous allez être redirigé vers la page de paiement.</p>
-          <p style="font-size: 11px; color: #888;">Si rien ne se passe, vérifiez que les pop-ups sont autorisés.</p>
-
           <script>
-            // 🔑 Injection de la clé publique envoyée par le lien du portail captif
             const publicKey = '${pub_key}'; 
-
-            // Configuration et lancement immédiat de FedaPay
             window.onload = function() {
               let widget = FedaPay.init({
                 public_key: publicKey,
@@ -90,14 +82,11 @@ export const PaymentController = {
                   }
                 },
                 onComplete: function(response) {
-                  // Si le paiement réussit côté front, on redirige vers /success
                   if(response.reason === 'SUCCESS' || response.status === 'approved') {
                     window.location.href = '/api/v1/payments/success?tx=' + "${internalTxId}" + "&mac=${mac || ''}&ip=${ip || ''}";
                   }
                 }
               });
-
-              // Redirection/Ouverture automatique sans action de l'utilisateur
               widget.open();
             };
           </script>
@@ -115,23 +104,22 @@ export const PaymentController = {
   /**
    * GET /success
    * Page de retour post-paiement (Délivre le code + Auto-Login)
-   * Le frontend FedaPay redirige vers ici.
    */
   async renderSuccessPage(req, res, next) {
     try {
       const { tx, mac, ip } = req.query;
 
-      // 1. Chercher la transaction validée et le code associé dans notre Base de Données
-      // (Le webhook a dû la traiter en arrière-plan)
-      const [rows] = await pool.execute(`
-          SELECT v.code, v.profile
-          FROM transactions t
-          JOIN vouchers v ON t.voucher_id = v.id
-          WHERE t.id = ? AND t.status = 'SUCCESS'
-          LIMIT 1
-       `, [tx]);
+      // 1. Chercher la transaction validée et le code associé dans Supabase
+      const { data: transactions, error } = await supabaseAdmin
+        .from('transactions')
+        .select(`
+            vouchers (username)
+          `)
+        .eq('id', tx)
+        .eq('status', 'SUCCESS')
+        .limit(1);
 
-      if (rows.length === 0) {
+      if (error || !transactions || transactions.length === 0) {
         return res.status(200).send(`
             <html>
               <body style="font-family: sans-serif; text-align: center; padding: 50px;">
@@ -143,10 +131,9 @@ export const PaymentController = {
          `);
       }
 
-      const code = rows[0].code;
+      const code = transactions[0].vouchers?.username;
 
       // 2. Rendu de la page de Succès + Script Auto-Login
-      // Exigence: Redirection DIRECTE. Le script Javascript post-formulaire MikroTik accomplit cela.
       const htmlContent = `
          <!DOCTYPE html>
          <html>
@@ -165,19 +152,16 @@ export const PaymentController = {
 
            <p style="color: #666;">Connexion automatique en cours au réseau WiFi...</p>
 
-           <!-- Formulaire invisible de soumission au routeur MikroTik -->
-           <!-- URL générique MikroTik Hotspot Login: http://router.local/login -->
            <form id="auto-login-form" action="http://logout.net/login" method="post" style="display:none;">
               <input type="hidden" name="username" value="${code}">
-              <input type="hidden" name="password" value="${code}"> <!-- Si mode VC, mdp = user -->
+              <input type="hidden" name="password" value="${code}"> 
               <input type="hidden" name="dst" value="https://google.com">
            </form>
 
            <script>
-             // Exécution immédiate
              setTimeout(() => {
                 document.getElementById('auto-login-form').submit();
-             }, 3000); // 3 secondes d'attente pour que le client voie son code
+             }, 3000);
            </script>
          </body>
          </html>

@@ -1,18 +1,8 @@
-import admin from 'firebase-admin';
-import pool from '../config/db.js';
-
-// Initialisation de Firebase Admin SDK
-try {
-    if (admin.apps.length === 0) {
-        admin.initializeApp();
-    }
-} catch (error) {
-    console.error("Firebase Admin SDK error:", error.message);
-}
+import { supabase, supabaseAdmin } from '../config/supabase.js';
 
 /**
  * 🛡️ RÈGLE 1 : Middleware d'Isolation "Multi-Tenant"
- * Supporte 2 méthodes : Firebase JWT (Dashboard Web) OU Clé API (Mobile/SaaS Sync)
+ * Supporte 2 méthodes : Supabase JWT (Dashboard Web) OU Clé API (Mobile/SaaS Sync)
  */
 export const requireAuth = async (req, res, next) => {
     try {
@@ -21,14 +11,19 @@ export const requireAuth = async (req, res, next) => {
 
         // 1. Authentification par Clé API (Si fournie par le mobile)
         if (apiKeyHeader) {
-            const [rows] = await pool.execute('SELECT id, email FROM managers WHERE api_key = ? LIMIT 1', [apiKeyHeader]);
-            if (rows.length === 0) throw new Error('API Key invalide.');
+            const { data: manager, error } = await supabaseAdmin
+                .from('managers')
+                .select('id, email')
+                .eq('api_key', apiKeyHeader)
+                .single();
 
-            req.user = { manager_id: rows[0].id, email: rows[0].email, method: 'api_key' };
+            if (error || !manager) throw new Error('API Key invalide.');
+
+            req.user = { manager_id: manager.id, email: manager.email, method: 'api_key' };
             return next();
         }
 
-        // 2. Authentification par JWT Firebase
+        // 2. Authentification par JWT Supabase
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
             return res.status(401).json({
                 success: false,
@@ -40,23 +35,50 @@ export const requireAuth = async (req, res, next) => {
         }
 
         const token = authHeader.split('Bearer ')[1];
-        const decodedToken = await admin.auth().verifyIdToken(token);
+
+        // Vérification du token directement avec Supabase
+        const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+
+        if (authError || !user) {
+            throw new Error('Token invalide ou expiré.');
+        }
 
         // Injection du Pivot de Sécurité Multi-Tenant
         req.user = {
-            manager_id: decodedToken.uid, // C'est LA clé pour toutes les requêtes SQL
-            email: decodedToken.email,
+            manager_id: user.id, // Supabase UID pour les politiques RLS
+            email: user.email,
             method: 'jwt'
         };
 
-        next(); // Poursuite vers le contrôleur sécurisé
+        next();
     } catch (error) {
         return res.status(401).json({
             success: false,
             error: {
                 code: 'UNAUTHORIZED_INVALID_CREDENTIALS',
-                message: 'Accès refusé. Token invalide ou expiré.'
+                message: error.message || 'Accès refusé. Token invalide ou expiré.'
             }
         });
+    }
+};
+import jwt from 'jsonwebtoken';
+const JWT_SECRET = process.env.JWT_SECRET || 'jservice_partner_secret_2026';
+
+/**
+ * 🛡️ RÈGLE 2 : Middleware Partenaires (JWT Interne)
+ */
+export const requirePartnerAuth = async (req, res, next) => {
+    try {
+        const token = req.cookies?.partner_token || (req.headers.authorization && req.headers.authorization.startsWith('Bearer ') ? req.headers.authorization.split(' ')[1] : null);
+
+        if (!token) {
+            return res.status(401).send('<script>window.location.href="/partners/auth";</script>');
+        }
+
+        const decoded = jwt.verify(token, JWT_SECRET);
+        req.user = { id: decoded.id };
+        next();
+    } catch (error) {
+        return res.status(401).send('<script>window.location.href="/partners/auth";</script>');
     }
 };

@@ -1,6 +1,5 @@
-import admin from 'firebase-admin';
 import crypto from 'crypto';
-import pool from '../config/db.js';
+import { supabaseAdmin } from '../config/supabase.js';
 
 export const LicenseService = {
     /**
@@ -47,63 +46,65 @@ export const LicenseService = {
         const ONE_MONTH_MS = 30.44 * 24 * 60 * 60 * 1000;
         const expiryDate = Date.now() + (ONE_MONTH_MS * durationMonths);
 
-        // 2. Écriture dans Firebase Firestore pour l'App Mobile
-        // 🛡️ FIX : On utilise l'ID Firebase de l'utilisateur comme nom de document.
-        // Cela garantit qu'un gérant aura TOUJOURS un seul document de licence (le dernier acheté/renouvelé).
-        try {
-            const db = admin.firestore();
-            await db.collection('saas_licenses').doc(userId).set({
-                key: licenseKey,
-                partnerDomain: domain,
-                plan: plan,
-                duration: durationMonths,
-                features: features, // 🔐 Débloque les sections de l'App
-                expiryDate: expiryDate,
-                status: 'USED',
-                usedBy: userId,
-                activatedAt: Date.now(),
-                // Flags pour les alertes d'expiration
-                notifiedAlmostExpired: false,
-                notifiedCriticalExpired: false
-            });
-            console.log(`[License Service] 🚀 Licence ${plan} (${durationMonths} Mois) activée pour l'UID: ${userId}`);
-        } catch (firebaseErr) {
-            console.error("[License Service] ❌ Erreur écriture Firestore:", firebaseErr.message);
-        }
+        // 2. Note: Auparavant, nous utilisions Firebase Firestore ici.
+        // Avec Supabase, les licences sont gérées directement via la table 'saas_licenses' ou 'managers'.
+        console.log(`[License Service] 🚀 Licence ${plan} (${durationMonths} Mois) générée pour l'UID: ${userId}`);
 
-        // 3. Mise à jour de notre base SQL Locale (Table managers & transactions)
-        const connection = await pool.getConnection();
+        // 3. Mise à jour de notre base locale (Table managers & transactions) avec Supabase
         try {
-            await connection.beginTransaction();
+            // A - Vérifier si le manager existe
+            const { data: existingManager, error: managerErr } = await supabaseAdmin
+                .from('managers')
+                .select('id')
+                .eq('id', userId)
+                .limit(1);
 
-            const [existing] = await connection.execute('SELECT id FROM managers WHERE id = ? FOR UPDATE', [userId]);
+            if (managerErr) throw managerErr;
+
             let apiKeyToReturn = 'sk_live_' + crypto.randomBytes(32).toString('hex');
 
-            if (existing.length === 0) {
-                // Optionnel : Lier provisoirement un email "pending"
-                await connection.execute(
-                    'INSERT INTO managers (id, email, api_key, license_key) VALUES (?, ?, ?, ?)',
-                    [userId, `user_${crypto.randomBytes(2).toString('hex')}@pending.com`, apiKeyToReturn, licenseKey]
-                );
+            if (!existingManager || existingManager.length === 0) {
+                // Créer le manager s'il n'existe pas
+                await supabaseAdmin.from('managers').insert([{
+                    id: userId,
+                    email: `user_${crypto.randomBytes(2).toString('hex')}@pending.com`,
+                    api_key: apiKeyToReturn,
+                    license_key: licenseKey,
+                    license_expiry_date: new Date(expiryDate).toISOString()
+                }]);
             } else {
-                await connection.execute('UPDATE managers SET license_key = ? WHERE id = ?', [licenseKey, userId]);
+                // Mettre à jour sa clé s'il existe
+                await supabaseAdmin
+                    .from('managers')
+                    .update({
+                        license_key: licenseKey,
+                        license_expiry_date: new Date(expiryDate).toISOString(),
+                        notified_almost_expired: false,
+                        notified_critical_expired: false
+                    })
+                    .eq('id', userId);
             }
 
-            // Logguer la transaction D'ACHAT DE LICENCE dans le backend
-            await connection.execute(`
-        INSERT INTO transactions (id, manager_id, amount, phone_number, status, voucher_id, mikrotik_status) 
-        VALUES (?, ?, ?, ?, 'SUCCESS', NULL, 'ACTIVATED')
-      `, [internalTxId, userId, amount, 'hidden']);
+            // B - Logguer la transaction D'ACHAT DE LICENCE dans le backend
+            await supabaseAdmin.from('transactions').insert([{
+                id: internalTxId,
+                manager_id: userId,
+                amount: amount,
+                status: 'SUCCESS',
+                type: 'LIC_PURCHASE',
+                metadata: {
+                    phone: 'hidden',
+                    mikrotik_status: 'ACTIVATED',
+                    plan: plan,
+                    duration: durationMonths
+                }
+            }]);
 
-            await connection.commit();
-
-            console.log(`[License Service] ✅ Transaction (${plan}) consignée en DB MySQL (${internalTxId})`);
+            console.log(`[License Service] ✅ Transaction (${plan}) consignée dans Supabase (${internalTxId})`);
 
         } catch (dbError) {
-            await connection.rollback();
+            console.error("[License Service] ❌ Erreur écriture Supabase:", dbError.message);
             throw dbError;
-        } finally {
-            connection.release();
         }
 
         return licenseKey;

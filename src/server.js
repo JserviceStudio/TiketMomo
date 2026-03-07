@@ -20,8 +20,26 @@ const logger = pino({
 
 const app = express();
 
+import cookieParser from 'cookie-parser';
+import partnerRoutes from './routes/partner/partnerRoutes.js';
+
+// Configuration des fichiers statiques
+app.use(express.static('public'));
+app.use(cookieParser());
+
 // Middlewares Globaux (Sécurité & Performances)
-app.use(helmet()); // Protège les headers HTTP
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      "script-src": ["'self'", "'unsafe-inline'", "'unsafe-eval'", "cdn.jsdelivr.net", "https://www.googletagmanager.com"],
+      "script-src-attr": ["'unsafe-inline'"],
+      "style-src": ["'self'", "'unsafe-inline'", "cdn.jsdelivr.net", "fonts.googleapis.com", "rsms.me"],
+      "font-src": ["'self'", "cdn.jsdelivr.net", "fonts.gstatic.com", "rsms.me", "data:"],
+      "img-src": ["'self'", "data:", "https:", "blob:"]
+    },
+  },
+})); // Protège les headers HTTP avec une CSP adaptée aux CDNs
 app.use(cors()); // Configure CORS
 app.use(express.json()); // Parsing du JSON entrant (Stateless)
 app.use(morgan('combined')); // Logging HTTP structuré
@@ -67,6 +85,7 @@ app.use('/api/v1/vouchers', voucherRoutes);
 app.use('/api/v1/sales', salesRoutes); // Routes VENTES & STATS
 app.use('/api/v1/payments', paymentRoutes); // Routes PAIEMENT (HTML)
 app.use('/api/v1/webhooks', webhookRoutes); // Routes WEBHOOK (API Server-to-Server)
+app.use('/partners', partnerRoutes); // 🆕 ESPACE PARTENAIRES J+SERVICE
 
 // Catch 404 (Route non trouvée)
 app.use(notFoundHandler);
@@ -84,24 +103,16 @@ if (process.env.NODE_ENV !== 'test') { // Ne pas lancer pendant les tests unitai
 const PORT = process.env.PORT || 3000;
 
 // 🏗️ GESTION DU CYCLE DE VIE (Graceful Shutdown - Norme Google)
-import pool from './config/db.js';
 
 const server = app.listen(PORT, () => {
-  logger.info(`🚀 Serveur TiketMomo démarré sur le port ${PORT}`);
+  logger.info(`🚀 Serveur J+SERVICE démarré sur le port ${PORT}`);
 });
 
 const shutdown = async () => {
   logger.info('🛑 Signal reçu: Fermeture du serveur...');
-  server.close(async () => {
+  server.close(() => {
     logger.info('📡 Serveur HTTP fermé.');
-    try {
-      await pool.end();
-      logger.info('🗄️ Pool de connexion MySQL fermé.');
-      process.exit(0);
-    } catch (err) {
-      logger.error('❌ Erreur lors de la fermeture du pool MySQL:', err);
-      process.exit(1);
-    }
+    process.exit(0);
   });
 };
 

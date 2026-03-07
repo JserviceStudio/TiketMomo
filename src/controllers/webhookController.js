@@ -2,7 +2,7 @@ import { VoucherModel } from '../models/voucherModel.js';
 import { FedaPayService } from '../services/fedapayService.js';
 import { LicenseService } from '../services/licenseService.js';
 import { MonitoringService } from '../services/monitoring/monitoringService.js';
-import pool from '../config/db.js';
+import { supabaseAdmin } from '../config/supabase.js';
 
 export const WebhookController = {
     /**
@@ -37,14 +37,20 @@ export const WebhookController = {
                     if (!userId || !internalTxId) return res.status(200).send('Missing internal license parameters.');
 
                     // On vérifie (Idempotence) si cette transaction FedaPay est déjà exécutée
-                    const [existing] = await pool.execute('SELECT id FROM transactions WHERE id = ?', [internalTxId]);
-                    if (existing.length > 0) return res.status(200).send('License already provided (Idempotent)');
+                    const { data: existing, error: checkError } = await supabaseAdmin
+                        .from('transactions')
+                        .select('id')
+                        .eq('id', internalTxId)
+                        .limit(1);
 
-                    // L'admin a payé: Génération, écriture sur Firestore (avec le Plan) et mise à jour MySQL
-                    await LicenseService.generateAndActivateLicense(userId, domain || 'tiketmomo.app', internalTxId, transaction.amount, plan, parseInt(durationStr));
+                    if (checkError) throw checkError;
+                    if (existing && existing.length > 0) return res.status(200).send('License already provided (Idempotent)');
+
+                    // L'admin a payé: Génération, écriture sur Firestore (avec le Plan) et mise à jour Supabase
+                    await LicenseService.generateAndActivateLicense(userId, domain || 'jservice.cloud', internalTxId, transaction.amount, plan, parseInt(durationStr));
 
                     // 🛡️ AUDIT LOG IMMUTABLE (Stripe Style)
-                    await MonitoringService.logAudit(pool, {
+                    await MonitoringService.logAudit({
                         managerId: userId,
                         actionType: 'LICENSE_ACTIVATION',
                         resourceId: internalTxId,
@@ -63,47 +69,39 @@ export const WebhookController = {
 
                 if (!managerId || !profile || !internalTxId) return res.status(200).send('Missing mandatory metadata. Ignored.');
 
-                // 2. Transaction SQL (ACID) : Réserver un ticket & valider le paiement (Asynchronisme)
-                const connection = await pool.getConnection();
+                // 2. Transaction Supabase : Réserver un ticket & valider le paiement via RPC
                 try {
-                    // Lock de ligne (FOR UPDATE SKIP LOCKED) sur un "voucher" libre pour ce manager et ce profil.
-                    // On empêche les conflits si 2 personnes achètent le même profil à la même nano-seconde.
-                    await connection.beginTransaction();
-
                     // A- Vérifie d'abord si on l'a pas déjà traité (Idempotence)
-                    const [existingTx] = await connection.execute('SELECT id FROM transactions WHERE id = ? FOR UPDATE', [internalTxId]);
+                    const { data: existingTx, error: txCheckError } = await supabaseAdmin
+                        .from('transactions')
+                        .select('id')
+                        .eq('id', internalTxId)
+                        .limit(1);
 
-                    if (existingTx.length > 0) {
-                        // Déjà traité, FedaPay a juste refait un ping
-                        await connection.rollback();
-                        return res.status(200).send('Already processed');
-                    }
+                    if (txCheckError) throw txCheckError;
+                    if (existingTx && existingTx.length > 0) return res.status(200).send('Already processed');
 
-                    // B- Trouver un ticket Libre (Règle 4: Indexation NVMe Striée)
-                    // On utilise l'index 'idx_manager_profile_used' pour une réponse < 5ms
-                    let findVoucherSql = 'SELECT id, code FROM vouchers WHERE manager_id = ? AND profile = ? AND used = 0';
-                    let queryParams = [managerId, profile];
+                    // B- Trouver et verrouiller un ticket Libre (RPC PostgreSQL SKIP LOCKED)
+                    const { data: freeVouchers, error: rpcError } = await supabaseAdmin.rpc('get_next_voucher', {
+                        m_id: managerId,
+                        p_val: parseFloat(transaction.amount)
+                    });
 
-                    // Si on a un site_id spécifique dans les métadonnées, on affine la recherche
-                    if (metadata.site_id) {
-                        findVoucherSql += ' AND site_id = ?';
-                        queryParams.push(metadata.site_id);
-                    }
+                    if (rpcError) throw rpcError;
 
-                    findVoucherSql += ' LIMIT 1 FOR UPDATE SKIP LOCKED';
-
-                    const [freeVouchers] = await connection.execute(findVoucherSql, queryParams);
-
-                    if (freeVouchers.length === 0) {
+                    if (!freeVouchers || freeVouchers.length === 0) {
                         // Rupture de stock critique ! 
-                        await connection.execute(`
-                INSERT INTO transactions (id, manager_id, amount, phone_number, status, voucher_id, mikrotik_status) 
-                VALUES (?, ?, ?, ?, 'FAILED', NULL, 'PENDING')
-             `, [internalTxId, managerId, transaction.amount, 'hidden']);
-                        await connection.commit();
+                        await supabaseAdmin.from('transactions').insert([{
+                            id: internalTxId,
+                            manager_id: managerId,
+                            amount: transaction.amount,
+                            status: 'FAILED',
+                            type: 'VOUCHER_SALE',
+                            metadata: { phone: 'hidden', mikrotik_status: 'PENDING' }
+                        }]);
 
                         // 🚩 LOG ET ALERTE ADMIN
-                        await MonitoringService.logError('PAYMENT_STOCK', `Rupture critique pour profil ${profile}`, {
+                        await MonitoringService.logError('PAYMENT_STOCK', `Rupture critique pour prix ${transaction.amount}`, {
                             manager_id: managerId,
                             tx_id: internalTxId,
                             severity: 'CRITICAL'
@@ -114,19 +112,27 @@ export const WebhookController = {
 
                     const ticketId = freeVouchers[0].id;
 
-                    // C- Marquer le ticket comme utilisé
-                    await connection.execute('UPDATE vouchers SET used = 1, transaction_id = ? WHERE id = ?', [internalTxId, ticketId]);
+                    // C- Mettre à jour le ticket avec l'ID de transaction (le 'used = true' est déjà fait par RPC)
+                    await supabaseAdmin
+                        .from('vouchers')
+                        .update({ sale_id: internalTxId }) // sale_id dans le schéma
+                        .eq('id', ticketId);
 
                     // D- Insérer la transaction comme SUCCESS
-                    await connection.execute(`
-            INSERT INTO transactions (id, manager_id, amount, phone_number, status, voucher_id, mikrotik_status) 
-            VALUES (?, ?, ?, ?, 'SUCCESS', ?, 'PENDING')
-          `, [internalTxId, managerId, transaction.amount, 'hidden', ticketId]);
+                    const { error: insertError } = await supabaseAdmin.from('transactions').insert([{
+                        id: internalTxId,
+                        manager_id: managerId,
+                        amount: transaction.amount,
+                        status: 'SUCCESS',
+                        type: 'VOUCHER_SALE',
+                        voucher_id: ticketId,
+                        metadata: { phone: 'hidden', mikrotik_status: 'PENDING' }
+                    }]);
 
-                    await connection.commit(); // Fin ACID sécurisée
+                    if (insertError) throw insertError;
 
                     // 🛡️ AUDIT LOG IMMUTABLE (Stripe Style)
-                    await MonitoringService.logAudit(pool, {
+                    await MonitoringService.logAudit({
                         managerId,
                         actionType: 'VOUCHER_PURCHASE',
                         resourceId: internalTxId,
@@ -135,22 +141,12 @@ export const WebhookController = {
                         req
                     });
 
-                    // 🤖 DÉCLENCHEUR INTELLIGENCE ARTIFICIELLE (Background Task)
-                    // Importation dynamique propre pour éviter les dépendances circulaires
-                    import('./salesController.js')
-                        .then(module => {
-                            const sc = module.SalesController || module.default?.SalesController;
-                            if (sc) sc.checkStockThresholdAndNotify(managerId, profile).catch(e => console.error("FCM Error:", e));
-                        })
-                        .catch(err => console.error("SalesController Import Error:", err));
+                    // Note: Le trigger PG tr_check_low_stock s'occupe de la notification de stock automatiquement.
 
                     return res.status(200).json({ success: true, message: 'Webhook Processed' });
 
                 } catch (dbError) {
-                    await connection.rollback();
                     throw dbError; // Transmission à catch englobant
-                } finally {
-                    connection.release();
                 }
             }
 

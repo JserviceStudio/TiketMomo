@@ -7,5 +7,6 @@ const router = express.Router();
 // 👤 Routes Gérants (Tableau de bord Web)
 // POST: /api/v1/managers/onboard (DOIT être appelé avec le JWT Firebase)
 router.post('/onboard', requireAuth, ManagerController.onboardManager);
+router.post('/branding', requireAuth, ManagerController.updateBranding);
 
 export default router;

@@ -16,30 +16,30 @@ const logger = pino({
 // État du Circuit Breaker (Interne)
 const circuits = {
     'FEDAPAY': { failureThreshold: 5, failureCount: 0, lastFailure: null, isOpen: false },
-    'FIREBASE': { failureThreshold: 3, failureCount: 0, lastFailure: null, isOpen: false }
+    'SUPABASE': { failureThreshold: 3, failureCount: 0, lastFailure: null, isOpen: false }
 };
 
 export const MonitoringService = {
     /**
      * 🛡️ AUDIT LOG (IMMUTABLE DATABASE) - Norme Financière Pro
      */
-    async logAudit(pool, { managerId, actionType, resourceId, severity = 'LOW', details = {}, req = null }) {
+    async logAudit({ managerId, actionType, resourceId, severity = 'LOW', details = {}, req = null }) {
         try {
-            const sql = `
-                INSERT INTO audit_logs (manager_id, action_type, resource_id, severity, details, ip_address, user_agent)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            `;
-            await pool.execute(sql, [
-                managerId || null,
-                actionType,
-                resourceId || null,
-                severity,
-                JSON.stringify(details),
-                req ? (req.headers['x-forwarded-for'] || req.socket.remoteAddress) : 'SERVER-INTERNAL',
-                req ? req.headers['user-agent'] : 'SYSTEM'
-            ]);
+            const supabaseModule = await import('../../config/supabase.js');
+            const supabaseAdmin = supabaseModule.supabaseAdmin;
+
+            const { error } = await supabaseAdmin.from('audit_logs').insert([{
+                user_id: managerId || null, // Dans le schéma SQL 'user_id'
+                action: actionType,         // Dans le schéma SQL 'action'
+                entity_type: severity,      // On recycle severity sur entity_type ou on l'ajoute
+                entity_id: resourceId || null,
+                details: details,
+                ip_address: req ? (req.headers['x-forwarded-for'] || req.socket.remoteAddress) : 'SERVER-INTERNAL'
+            }]);
+
+            if (error) throw error;
         } catch (err) {
-            this.logError('AUDIT_FAIL', err); // On logge si l'audit échoue (Symptôme de DB saturée)
+            this.logError('AUDIT_FAIL', err);
         }
     },
 
@@ -100,11 +100,11 @@ export const MonitoringService = {
      */
     async _notifyAdminFailure(context, message) {
         // En prod, remplacez par votre propre UID Admin Firebase
-        const ADMIN_UID = process.env.ADMIN_FIREBASE_UID || 'JS_STUDIO_ADMIN';
+        const ADMIN_UID = process.env.ADMIN_SUPABASE_UID || 'JS_STUDIO_ADMIN';
 
         await NotificationService.sendPushToManager(
             ADMIN_UID,
-            '🚨 Alerte Système TiketMomo',
+            '🚨 Alerte Système J+SERVICE',
             `Échec critique dans: ${context}. Erreur: ${message.substring(0, 50)}...`,
             { type: 'SYSTEM_FAILURE', context: context }
         );

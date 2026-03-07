@@ -1,52 +1,85 @@
-import pool from '../config/db.js';
+import { supabaseAdmin } from '../config/supabase.js';
 
 export const TransactionModel = {
   /**
    * Récupère la liste des transactions d'un gérant (Historique des ventes / Dashboard)
    */
   async getTransactionsByManager(managerId, limit = 50, offset = 0) {
-    const [rows] = await pool.execute(`
-      SELECT t.id, t.amount, t.status, t.created_at, v.profile, v.code 
-      FROM transactions t
-      LEFT JOIN vouchers v ON t.voucher_id = v.id
-      WHERE t.manager_id = ? 
-      ORDER BY t.created_at DESC
-      LIMIT ? OFFSET ?
-    `, [managerId, parseInt(limit), parseInt(offset)]);
+    const { data, error } = await supabaseAdmin
+      .from('transactions')
+      .select(`
+        id, 
+        amount, 
+        status, 
+        created_at, 
+        vouchers (profile, code)
+      `)
+      .eq('manager_id', managerId)
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
 
-    return rows;
+    if (error) {
+      console.error('[TransactionModel] Error fetching transactions:', error.message);
+      return [];
+    }
+
+    // Aplanir la structure pour rester compatible avec l'ancien format si nécessaire
+    return data.map(t => ({
+      ...t,
+      profile: t.vouchers?.profile,
+      code: t.vouchers?.code
+    }));
   },
 
   /**
    * Calcul des statistiques financières pour l'application mobile (CA, Nbre ventes)
    */
   async getSalesStats(managerId) {
-    const [rows] = await pool.execute(`
-      SELECT 
-        COUNT(id) as total_sales,
-        SUM(amount) as total_revenue
-      FROM transactions 
-      WHERE manager_id = ? AND status = 'SUCCESS'
-    `, [managerId]);
+    const { data, error } = await supabaseAdmin
+      .from('transactions')
+      .select('amount')
+      .eq('manager_id', managerId)
+      .eq('status', 'SUCCESS');
+
+    if (error) {
+      console.error('[TransactionModel] Error fetching sales stats:', error.message);
+      return { totalVentes: 0, chiffreAffaires: 0 };
+    }
+
+    const totalRevenue = data.reduce((sum, t) => sum + parseFloat(t.amount || 0), 0);
 
     return {
-      totalVentes: rows[0].total_sales || 0,
-      chiffreAffaires: rows[0].total_revenue || 0
+      totalVentes: data.length,
+      chiffreAffaires: totalRevenue
     };
   },
 
   /**
    * Vérifie le niveau de stock (tickets restants) pour CHAQUE profil de ce gérant
-   * Permet de détecter le Seuil Critique (ex: < 10)
    */
   async getStockLevels(managerId) {
-    const [rows] = await pool.execute(`
-       SELECT profile, COUNT(id) as remaining_stock
-       FROM vouchers
-       WHERE manager_id = ? AND used = 0
-       GROUP BY profile
-     `, [managerId]);
+    // Note: Supabase n'a pas de GROUP BY direct simple via .select(). 
+    // On peut utiliser une vue SQL ou une fonction RPC, ou le faire en JS pour les petites quantités.
+    // Ici, on récupère tout et on groupe en JS pour la simplicité, car le nombre de profils est restreint.
+    const { data, error } = await supabaseAdmin
+      .from('vouchers')
+      .select('profile')
+      .eq('manager_id', managerId)
+      .eq('used', false);
 
-    return rows; // Tableau : [{ profile: '100F-6H', remaining_stock: 45 }, ...]
+    if (error) {
+      console.error('[TransactionModel] Error fetching stock levels:', error.message);
+      return [];
+    }
+
+    const counts = data.reduce((acc, v) => {
+      acc[v.profile] = (acc[v.profile] || 0) + 1;
+      return acc;
+    }, {});
+
+    return Object.entries(counts).map(([profile, count]) => ({
+      profile,
+      remaining_stock: count
+    }));
   }
 };

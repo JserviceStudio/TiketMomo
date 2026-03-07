@@ -1,68 +1,81 @@
 import crypto from 'crypto';
-import pool from '../config/db.js';
+import { supabaseAdmin } from '../config/supabase.js';
 
 export const ManagerController = {
     /**
      * POST /api/v1/managers/onboard
      * Appelé automatiquement par l'Application Mobile (en arrière-plan).
-     * Reçoit le Token Firebase (Header) et la Clé de Licence SaaS (Body).
      */
     async onboardManager(req, res, next) {
         try {
-            // 🛡️ L'ID Firebase et Email viennent du token validé par le middleware d'Auth (Zero-Trust)
             const { manager_id, email } = req.user;
-
-            // La licence envoyée par l'application mobile (Optionnel ou Obligatoire selon vos règles)
             const { license_key } = req.body;
 
-            const connection = await pool.getConnection();
-            try {
-                await connection.beginTransaction();
+            // 1. On récupère ou on prépare les données
+            const { data: existing, error: selectError } = await supabaseAdmin
+                .from('managers')
+                .select('id, api_key')
+                .eq('id', manager_id)
+                .single();
 
-                // Vérifier si le gérant a déjà son 'Espace' MySQL
-                const [existing] = await connection.execute('SELECT id, api_key, email FROM managers WHERE id = ? FOR UPDATE', [manager_id]);
+            let apiKeyToReturn;
 
-                let apiKeyToReturn;
-
-                if (existing.length > 0) {
-                    // L'Admin a déjà un compte, on met à jour la licence si fournie
-                    apiKeyToReturn = existing[0].api_key;
-                    if (license_key) {
-                        await connection.execute('UPDATE managers SET license_key = ? WHERE id = ?', [license_key, manager_id]);
-                    }
-                } else {
-                    // --- C'est un nouvel Admin ---
-                    // Le serveur génère secrètement la clé API
-                    apiKeyToReturn = 'sk_live_' + crypto.randomBytes(32).toString('hex');
-
-                    // Création 100% Automatique de l'Espace Gérant dans MySQL
-                    await connection.execute(
-                        'INSERT INTO managers (id, email, api_key, license_key) VALUES (?, ?, ?, ?)',
-                        [manager_id, email, apiKeyToReturn, license_key || null]
-                    );
+            if (existing) {
+                apiKeyToReturn = existing.api_key;
+                if (license_key) {
+                    await supabaseAdmin
+                        .from('managers')
+                        .update({ license_key })
+                        .eq('id', manager_id);
                 }
+            } else {
+                // Nouveau Gérant
+                apiKeyToReturn = 'sk_live_' + crypto.randomBytes(32).toString('hex');
 
-                await connection.commit();
+                const { error: insertError } = await supabaseAdmin
+                    .from('managers')
+                    .insert([{
+                        id: manager_id,
+                        email,
+                        api_key: apiKeyToReturn,
+                        license_key: license_key || null
+                    }]);
 
-                // L'app mobile va intercepter cette réponse JSON et sauvegarder la clé API en local silencieusement.
-                return res.status(200).json({
-                    success: true,
-                    message: 'Processus de configuration terminé.',
-                    data: {
-                        api_key: apiKeyToReturn, // L'application mobile la stockera automatiquement
-                        email: email
-                    }
-                });
-
-            } catch (dbError) {
-                await connection.rollback();
-                throw dbError;
-            } finally {
-                connection.release();
+                if (insertError) throw insertError;
             }
+
+            return res.status(200).json({
+                success: true,
+                message: 'Processus de configuration terminé.',
+                data: {
+                    api_key: apiKeyToReturn,
+                    email: email
+                }
+            });
 
         } catch (err) {
             next(err);
+        }
+    },
+
+    /**
+     * POST /api/v1/managers/branding
+     */
+    async updateBranding(req, res, next) {
+        try {
+            const { manager_id } = req.user;
+            const { logo_url } = req.body;
+
+            const { error } = await supabaseAdmin
+                .from('managers')
+                .update({ logo_url })
+                .eq('id', manager_id);
+
+            if (error) throw error;
+
+            res.json({ success: true, message: 'Branding mis à jour.' });
+        } catch (error) {
+            next(error);
         }
     }
 };
