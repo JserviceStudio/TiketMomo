@@ -8,11 +8,11 @@ export const SalesController = {
      */
     async getDashboardStats(req, res, next) {
         try {
-            const managerId = req.user.manager_id;
+            const clientId = req.user.manager_id;
 
-            const stats = await TransactionModel.getSalesStats(managerId);
-            const stockLevels = await TransactionModel.getStockLevels(managerId);
-            const recentTransactions = await TransactionModel.getTransactionsByManager(managerId, 20, 0);
+            const stats = await TransactionModel.getSalesStats(clientId);
+            const stockLevels = await TransactionModel.getStockLevels(clientId);
+            const recentTransactions = await TransactionModel.getTransactionsByClient(clientId, 20, 0);
 
             res.status(200).json({
                 success: true,
@@ -31,10 +31,10 @@ export const SalesController = {
      * Logique métier "Alerte Automatique"
      * Doit être appelée par le WebHook APRÈS un succès d'achat
      */
-    async checkStockThresholdAndNotify(managerId, profile) {
+    async checkStockThresholdAndNotify(clientId, profile) {
         try {
             // 1. Quel est notre stock actuel ?
-            const stockLevels = await TransactionModel.getStockLevels(managerId);
+            const stockLevels = await TransactionModel.getStockLevels(clientId);
             const currentProfileStock = stockLevels.find(s => s.profile === profile);
 
             const remaining = currentProfileStock ? currentProfileStock.remaining_stock : 0;
@@ -44,8 +44,8 @@ export const SalesController = {
 
             if (remaining <= CRITICAL_THRESHOLD) {
                 // ALERTE CRITIQUE : Il faut que Moailte IA de l'app Mobile bosse.
-                await NotificationService.sendPushToManager(
-                    managerId,
+                await NotificationService.sendPushToClient(
+                    clientId,
                     '⚠️ Stock Faible !',
                     `Il ne vous reste que ${remaining} tickets pour le forfait ${profile}.`,
                     {

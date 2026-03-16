@@ -8,7 +8,7 @@ export const ReportController = {
     async submitReport(req, res, next) {
         try {
             const { app_id, total_sales, total_transactions, raw_data, report_date } = req.body;
-            const managerId = req.user.manager_id;
+            const clientId = req.user.client_id || req.user.manager_id;
 
             if (!app_id || total_sales === undefined) {
                 return res.status(400).json({ success: false, message: "Données de rapport incomplètes." });
@@ -17,7 +17,7 @@ export const ReportController = {
             const { error } = await supabaseAdmin
                 .from('sales_reports')
                 .insert([{
-                    manager_id: managerId,
+                    manager_id: clientId,
                     app_id,
                     report_date: report_date || new Date().toISOString().split('T')[0],
                     total_sales,
@@ -38,17 +38,17 @@ export const ReportController = {
 
     /**
      * GET /api/v1/reports/my-history
-     * Le manager consulte ses propres rapports envoyés
+     * Le client consulte ses propres rapports envoyés
      */
     async getMyReports(req, res, next) {
         try {
-            const managerId = req.user.manager_id;
+            const clientId = req.user.client_id || req.user.manager_id;
             const { app_id } = req.query;
 
             let query = supabaseAdmin
                 .from('sales_reports')
                 .select('*')
-                .eq('manager_id', managerId)
+                .eq('manager_id', clientId)
                 .order('report_date', { ascending: false })
                 .limit(50);
 

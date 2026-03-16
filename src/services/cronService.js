@@ -37,7 +37,8 @@ export const CronService = {
 
     /**
      * 🔔 Surveillance et Notification d'Expiration des Licences (SaaS B2B)
-     * Tourne tous les jours pour prévenir les gérants à J-30 (Annuel) et J-10 (Tous)
+     * Tourne tous les jours pour prévenir les clients à J-30 et J-10.
+     * Compatibilité legacy conservée: les données vivent encore dans `managers`.
      */
     startLicenseMonitorTask() {
         // S'exécute tous les jours à 09:00 du matin
@@ -49,43 +50,40 @@ export const CronService = {
                 const TEN_DAYS_MS = 10 * 24 * 60 * 60 * 1000;
                 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
-                // On récupère les managers dont la licence approche
-                // Note: Dans l'écosystème migré, on utilise 'managers' ou une table 'saas_licenses' dédiée.
-                // Ici on assume que les données de licence sont dans 'managers' (au vu du schema.sql et LicenseService).
-                const { data: managers, error } = await supabaseAdmin
+                const { data: clients, error } = await supabaseAdmin
                     .from('managers')
                     .select('id, email, license_key, license_expiry_date, notified_almost_expired, notified_critical_expired')
                     .not('license_key', 'is', null);
 
                 if (error) throw error;
 
-                for (const manager of managers) {
-                    if (!manager.license_expiry_date) continue;
+                for (const client of clients) {
+                    if (!client.license_expiry_date) continue;
 
-                    const expiryDate = new Date(manager.license_expiry_date).getTime();
+                    const expiryDate = new Date(client.license_expiry_date).getTime();
                     const timeLeft = expiryDate - nowMs;
 
                     if (timeLeft <= 0) continue;
 
                     // ⚠️ Alerte Critique à 10 Jours - PRIORITÉ MAX (vérifiée EN PREMIER)
-                    if (timeLeft <= TEN_DAYS_MS && !manager.notified_critical_expired) {
-                        await NotificationService.sendPushToManager(
-                            manager.id,
+                    if (timeLeft <= TEN_DAYS_MS && !client.notified_critical_expired) {
+                        await NotificationService.sendPushToClient(
+                            client.id,
                             '🚨 Licence bientôt expirée !',
                             'Il vous reste moins de 10 jours avant la coupure de vos services SaaS. Renouvelez maintenant.',
                             { type: 'LICENSE_CRITICAL_10', action: 'OPEN_LICENSE_TAB' }
                         );
-                        await supabaseAdmin.from('managers').update({ notified_critical_expired: true }).eq('id', manager.id);
+                        await supabaseAdmin.from('managers').update({ notified_critical_expired: true }).eq('id', client.id);
                     }
                     // Alerte à 30 Jours (uniquement si pas encore en zone critique)
-                    else if (timeLeft <= THIRTY_DAYS_MS && !manager.notified_almost_expired) {
-                        await NotificationService.sendPushToManager(
-                            manager.id,
+                    else if (timeLeft <= THIRTY_DAYS_MS && !client.notified_almost_expired) {
+                        await NotificationService.sendPushToClient(
+                            client.id,
                             '⚠️ Votre licence approche de sa fin',
                             'Votre licence actuelle expirera dans moins de 30 jours. Pensez à la renouveler.',
                             { type: 'LICENSE_EXPIRING_30', action: 'OPEN_LICENSE_TAB' }
                         );
-                        await supabaseAdmin.from('managers').update({ notified_almost_expired: true }).eq('id', manager.id);
+                        await supabaseAdmin.from('managers').update({ notified_almost_expired: true }).eq('id', client.id);
                     }
                 }
                 console.log('🔔 [CRON] Notifications d\'expiration traitées avec succès.');

@@ -27,10 +27,10 @@ export const MonitoringService = {
     /**
      * 🛡️ AUDIT LOG (IMMUTABLE DATABASE) - Norme Financière Pro
      */
-    async logAudit({ managerId, actionType, resourceId, severity = 'LOW', details = {}, req = null }) {
+    async logAudit({ clientId, managerId, actionType, resourceId, severity = 'LOW', details = {}, req = null }) {
         try {
             const { error } = await supabaseAdmin.from('audit_logs').insert([{
-                user_id: managerId || null,
+                user_id: clientId || managerId || null,
                 action: actionType,
                 entity_id: resourceId || null,
                 details: { ...details, severity },
@@ -102,7 +102,7 @@ export const MonitoringService = {
         // En prod, remplacez par votre propre UID Admin Firebase
         const ADMIN_UID = process.env.ADMIN_SUPABASE_UID || 'JS_STUDIO_ADMIN';
 
-        await NotificationService.sendPushToManager(
+        await NotificationService.sendPushToClient(
             ADMIN_UID,
             '🚨 Alerte Système J+SERVICE',
             `Échec critique dans: ${context}. Erreur: ${message.substring(0, 50)}...`,
@@ -115,7 +115,7 @@ export const MonitoringService = {
      */
     translateError(errorCode) {
         const dictionary = {
-            'STOCK_DEPLETED': 'Désolé, plus de tickets disponibles. Le gérant a été alerté.',
+            'STOCK_DEPLETED': 'Désolé, plus de tickets disponibles. Le client a été alerté.',
             'PAYMENT_FAILED': 'Le paiement a échoué. Veuillez réessayer.',
             'CONNECTION_TIMEOUT': 'Le serveur met trop de temps à répondre. Vérifiez votre connexion.',
             'INVALID_PARAMS': 'Requête invalide. Paramètres manquants.',

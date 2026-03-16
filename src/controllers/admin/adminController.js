@@ -1,6 +1,5 @@
-import crypto from 'crypto';
-import { supabaseAdmin } from '../../config/supabase.js';
-import { Parser } from 'json2csv';
+import { AdminDashboardService } from '../../modules/admin-control-plane/services/adminDashboardService.js';
+import { AdminAccountService } from '../../modules/admin-control-plane/services/adminAccountService.js';
 
 export const AdminController = {
     /**
@@ -8,7 +7,7 @@ export const AdminController = {
      */
     async renderDashboard(req, res, next) {
         try {
-            const data = await AdminController._fetchDashboardData();
+            const data = await AdminDashboardService.fetchDashboardData();
             res.send(AdminController._generateHTML(data));
         } catch (error) {
             next(error);
@@ -17,147 +16,77 @@ export const AdminController = {
 
     async getStatsAPI(req, res) {
         try {
-            const data = await AdminController._fetchDashboardData();
+            const data = await AdminDashboardService.fetchDashboardData();
             res.json(data);
         } catch (error) {
             res.status(500).json({ success: false, error: error.message });
         }
     },
 
+    async getAccountsAPI(req, res) {
+        try {
+            const data = await AdminAccountService.listAccounts();
+            res.json({ success: true, data });
+        } catch (error) {
+            res.status(error.statusCode || 500).json({ success: false, error: error.message });
+        }
+    },
+
+    async createManagerAccountAPI(req, res) {
+        try {
+            const account = await AdminAccountService.createClientAccount(req.body || {});
+            res.status(201).json({ success: true, data: account });
+        } catch (error) {
+            res.status(error.statusCode || 500).json({ success: false, error: error.message });
+        }
+    },
+
+    async createResellerAccountAPI(req, res) {
+        try {
+            const account = await AdminAccountService.createResellerAccount(req.body || {});
+            res.status(201).json({ success: true, data: account });
+        } catch (error) {
+            res.status(error.statusCode || 500).json({ success: false, error: error.message });
+        }
+    },
+
+    async updateManagerStatusAPI(req, res) {
+        try {
+            const account = await AdminAccountService.updateClientStatus({
+                clientId: req.params.managerId,
+                status: req.body?.status
+            });
+            res.json({ success: true, data: account });
+        } catch (error) {
+            res.status(error.statusCode || 500).json({ success: false, error: error.message });
+        }
+    },
+
+    async createClientAccountAPI(req, res) {
+        return AdminController.createManagerAccountAPI(req, res);
+    },
+
+    async updateClientStatusAPI(req, res) {
+        req.params.managerId = req.params.clientId;
+        return AdminController.updateManagerStatusAPI(req, res);
+    },
+
     async generateLicensesAPI(req, res) {
         try {
             const { type, quantity, prefix } = req.body;
-            const batchId = 'LOT-' + crypto.randomBytes(3).toString('hex').toUpperCase();
-            const keys = [];
-
-            for (let i = 0; i < quantity; i++) {
-                const block1 = crypto.randomBytes(2).toString('hex').toUpperCase().padStart(5, '0');
-                const block2 = crypto.randomBytes(2).toString('hex').toUpperCase().padStart(5, '0');
-                keys.push(`JSVC-${prefix || 'STD'}-${block1}-${block2}`);
-            }
-
-            // Insert audit record in Supabase
-            const { error } = await supabaseAdmin
-                .from('license_batches')
-                .insert([{
-                    id: batchId,
-                    batch_name: `Batch ${prefix || 'STD'}`,
-                    license_type: type.includes('WIFI') ? 'WIFI' : 'FULL',
-                    quantity,
-                    generated_by: 'ADMIN'
-                }]);
-
-            if (error) throw error;
-
+            const { batchId, keys } = await AdminDashboardService.generateLicenseBatch({ type, quantity, prefix });
             res.json({ success: true, batchId, keys });
         } catch (error) {
             res.status(500).json({ success: false, error: error.message });
         }
     },
 
-    async _fetchDashboardData() {
-        // En Supabase, on fait plusieurs requêtes asynchrones en parallèle
-        const [
-            { count: totalManagers },
-            { data: txStats },
-            { data: revenueHistory },
-            { data: planStats },
-            { data: lowStockData },
-            { data: recentLicenses },
-            { data: recentBatches },
-            { data: settingsRows },
-            { data: commissionStats },
-            { count: totalResellers },
-            { data: topResellers },
-            { data: payoutRequests },
-            { data: auditLogs }
-        ] = await Promise.all([
-            supabaseAdmin.from('managers').select('*', { count: 'exact', head: true }),
-            supabaseAdmin.rpc('get_admin_tx_stats'), // On peut utiliser un RPC pour les aggrégations complexes
-            supabaseAdmin.rpc('get_revenue_history_7d'),
-            supabaseAdmin.rpc('get_license_type_stats'),
-            supabaseAdmin.rpc('get_low_stock_managers'),
-            supabaseAdmin.from('transactions').select('*, managers(email)').ilike('id', 'LIC_%').order('created_at', { ascending: false }).limit(5),
-            supabaseAdmin.from('license_batches').select('*').order('created_at', { ascending: false }).limit(5),
-            supabaseAdmin.from('system_settings').select('setting_key, setting_value'),
-            supabaseAdmin.rpc('get_total_commissions_30d'),
-            supabaseAdmin.from('resellers').select('*', { count: 'exact', head: true }),
-            supabaseAdmin.from('resellers').select('*, commission_logs(count)').order('balance', { ascending: false }).limit(5), // Note: count relation needs exact schema
-            supabaseAdmin.from('payout_requests').select('*, resellers(name)').eq('status', 'PENDING').order('created_at', { ascending: false }),
-            supabaseAdmin.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(10)
-        ]);
-
-        const settings = {};
-        (settingsRows || []).forEach(row => {
-            try {
-                settings[row.setting_key] = JSON.parse(row.setting_value);
-            } catch (e) {
-                settings[row.setting_key] = row.setting_value;
-            }
-        });
-
-        // Fallback pour les stats complexes si les RPC ne sont pas encore prêts
-        const stats = txStats ? txStats[0] : { total_tx: 0, total_volume: 0, active_managers: 0 };
-
-        return {
-            stats: {
-                managers: totalManagers || 0,
-                tx: stats.total_tx || 0,
-                volume: stats.total_volume || 0,
-                active: stats.active_managers || 0
-            },
-            charts: {
-                revenue: revenueHistory || [],
-                plans: planStats || []
-            },
-            lowStock: lowStockData || [],
-            licenses: (recentLicenses || []).map(l => ({ ...l, email: l.managers?.email })),
-            batches: recentBatches || [],
-            marketing: {
-                totalCommissions: (commissionStats && commissionStats[0]?.total) || 0,
-                totalResellers: totalResellers || 0,
-                topResellers: (topResellers || []).map(r => ({ ...r, sales_count: r.commission_logs?.length || 0 })),
-                payouts: (payoutRequests || []).map(p => ({ ...p, reseller_name: p.resellers?.name }))
-            },
-            auditLogs: auditLogs || [],
-            config: settings
-        };
-    },
-
     async processPayoutAPI(req, res) {
         const { payoutId, action } = req.body;
 
         try {
-            if (action === 'APPROVE') {
-                const { error } = await supabaseAdmin
-                    .from('payout_requests')
-                    .update({ status: 'SUCCESS' })
-                    .eq('id', payoutId);
-
-                if (error) throw error;
-                res.json({ success: true, message: 'Retrait approuvé !' });
-            } else {
-                const { data: payout, error: fetchError } = await supabaseAdmin
-                    .from('payout_requests')
-                    .select('reseller_id, amount')
-                    .eq('id', payoutId)
-                    .single();
-
-                if (fetchError || !payout) throw new Error('Demande introuvable.');
-
-                // Restituer les fonds
-                await supabaseAdmin.rpc('refund_reseller_balance', {
-                    reseller_id: payout.reseller_id,
-                    amount_to_add: payout.amount
-                });
-
-                await supabaseAdmin
-                    .from('payout_requests')
-                    .update({ status: 'FAILED', error_message: 'Rejeté par l\'admin' })
-                    .eq('id', payoutId);
-
-                res.json({ success: true, message: 'Retrait rejeté et fonds restitués.' });
-            }
+            const result = await AdminDashboardService.processPayout({ payoutId, action });
+            res.json({ success: true, message: result.message });
         } catch (error) {
             res.status(500).json({ success: false, error: error.message });
         }
@@ -166,15 +95,7 @@ export const AdminController = {
     async updateSettingsAPI(req, res) {
         try {
             const { key, value } = req.body;
-            const { error } = await supabaseAdmin
-                .from('system_settings')
-                .upsert({
-                    setting_key: key,
-                    setting_value: JSON.stringify(value),
-                    updated_at: new Date().toISOString()
-                }, { onConflict: 'setting_key' });
-
-            if (error) throw error;
+            await AdminDashboardService.updateSetting({ key, value });
             res.json({ success: true });
         } catch (error) {
             res.status(500).json({ success: false, error: error.message });
@@ -183,24 +104,7 @@ export const AdminController = {
 
     async exportDataAPI(req, res) {
         try {
-            const { data: transactions, error } = await supabaseAdmin
-                .from('transactions')
-                .select('id, manager_id, amount, status, created_at, managers(email)')
-                .order('created_at', { ascending: false })
-                .limit(500);
-
-            if (error) throw error;
-
-            const formatted = transactions.map(t => ({
-                id: t.id,
-                manager: t.managers?.email,
-                amount: t.amount,
-                status: t.status,
-                created_at: t.created_at
-            }));
-
-            const json2csvParser = new Parser();
-            const csv = json2csvParser.parse(formatted);
+            const csv = await AdminDashboardService.buildTransactionsCsv();
 
             res.header('Content-Type', 'text/csv');
             res.attachment('export_transactions_jservice.csv');
@@ -224,6 +128,9 @@ export const AdminController = {
             <meta charset="utf-8">
               <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
               <title>J+SERVICE | Admin Pro</title>
+              <link rel="preconnect" href="https://fonts.googleapis.com">
+              <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+              <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
               
               <!-- Favicon -->
               <link rel="shortcut icon" href="/admin/assets/images/favicon.ico">
@@ -245,14 +152,369 @@ export const AdminController = {
 
               
               <style>
-                *:focus-visible { outline: 3px solid var(--bs-primary); outline-offset: 2px; border-radius: 4px; }
-                .skip-link { position: absolute; top: -60px; left: 0; background: var(--bs-primary); color: white; padding: 12px 24px; z-index: 10000; transition: top 0.2s; font-weight: bold; border-radius: 0 0 8px 0; }
+                :root {
+                  --admin-bg: #f3f1ea;
+                  --admin-panel: rgba(255, 255, 255, 0.86);
+                  --admin-panel-strong: #ffffff;
+                  --admin-ink: #13212f;
+                  --admin-muted: #5b6b7b;
+                  --admin-line: rgba(19, 33, 47, 0.08);
+                  --admin-primary: #0f766e;
+                  --admin-primary-2: #0b5f5a;
+                  --admin-accent: #d97706;
+                  --admin-danger: #c2410c;
+                  --admin-shadow: 0 24px 60px rgba(27, 39, 51, 0.10);
+                }
+                html, body { background:
+                  radial-gradient(circle at top left, rgba(15, 118, 110, 0.10), transparent 22rem),
+                  radial-gradient(circle at top right, rgba(217, 119, 6, 0.12), transparent 26rem),
+                  linear-gradient(180deg, #f8f6f1 0%, #f1efe9 100%);
+                  color: var(--admin-ink);
+                  font-family: 'Manrope', sans-serif;
+                }
+                *:focus-visible { outline: 3px solid var(--admin-primary); outline-offset: 3px; border-radius: 8px; }
+                .skip-link { position: absolute; top: -60px; left: 0; background: var(--admin-primary); color: white; padding: 12px 24px; z-index: 10000; transition: top 0.2s; font-weight: bold; border-radius: 0 0 8px 0; }
                 .skip-link:focus { top: 0; }
                 .live-badge { display: none; }
                 .is-live .live-badge { display: inline-flex; }
-                /* Fix pour les sections dans Hope UI */
                 .tab-section.d-none { display: none !important; }
-                .sidebar-default .sidebar-list .nav-link.active { background-color: var(--bs-primary); color: #fff !important; }
+                .sidebar-default { background: rgba(13, 24, 35, 0.92); backdrop-filter: blur(16px); border-right: 1px solid rgba(255,255,255,0.08); }
+                .sidebar-default .navbar-brand, .sidebar-default .logo-title, .sidebar-default .default-icon, .sidebar-default .item-name { color: #f5f7fa !important; }
+                .sidebar-default .sidebar-list .nav-link { border-radius: 16px; margin: 0.25rem 0.75rem; color: rgba(245,247,250,0.80) !important; min-height: 48px; }
+                .sidebar-default .sidebar-list .nav-link:hover { background: rgba(255,255,255,0.08); color: #fff !important; }
+                .sidebar-default .sidebar-list .nav-link.active {
+                  background: linear-gradient(135deg, rgba(15,118,110,0.92), rgba(11,95,90,0.92));
+                  color: #fff !important;
+                  box-shadow: inset 0 1px 0 rgba(255,255,255,0.18), 0 12px 24px rgba(15,118,110,0.20);
+                }
+                .iq-navbar {
+                  background: rgba(255, 255, 255, 0.76);
+                  backdrop-filter: blur(18px);
+                  border-bottom: 1px solid var(--admin-line);
+                }
+                .iq-navbar-header {
+                  height: auto !important;
+                  min-height: 240px;
+                  border-bottom: 1px solid var(--admin-line);
+                  background: transparent;
+                }
+                .iq-header-img {
+                  opacity: 0.16;
+                  mix-blend-mode: multiply;
+                }
+                .content-inner { padding-top: 1rem; }
+                .top-summary-grid {
+                  display: grid;
+                  grid-template-columns: 1.25fr 1fr;
+                  gap: 1.25rem;
+                  margin-top: 1.5rem;
+                }
+                .hero-card, .ops-card {
+                  background: linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,255,255,0.82));
+                  border: 1px solid rgba(19,33,47,0.08);
+                  border-radius: 28px;
+                  box-shadow: var(--admin-shadow);
+                }
+                .hero-card {
+                  padding: 1.5rem;
+                }
+                .hero-kicker {
+                  display: inline-flex;
+                  align-items: center;
+                  gap: 0.5rem;
+                  background: rgba(15,118,110,0.10);
+                  color: var(--admin-primary-2);
+                  padding: 0.55rem 0.9rem;
+                  border-radius: 999px;
+                  font-weight: 700;
+                  font-size: 0.84rem;
+                  letter-spacing: 0.01em;
+                }
+                .hero-title {
+                  font-size: clamp(2rem, 4vw, 3.4rem);
+                  line-height: 0.98;
+                  letter-spacing: -0.04em;
+                  margin: 1rem 0 0.8rem;
+                  max-width: 12ch;
+                }
+                .hero-copy {
+                  max-width: 58ch;
+                  color: var(--admin-muted);
+                  font-size: 1rem;
+                  line-height: 1.7;
+                }
+                .action-row {
+                  display: flex;
+                  flex-wrap: wrap;
+                  gap: 0.75rem;
+                  margin-top: 1.25rem;
+                }
+                .action-chip {
+                  display: inline-flex;
+                  align-items: center;
+                  justify-content: center;
+                  min-height: 46px;
+                  padding: 0.8rem 1rem;
+                  border-radius: 14px;
+                  border: 1px solid rgba(19,33,47,0.08);
+                  background: #fff;
+                  color: var(--admin-ink);
+                  text-decoration: none;
+                  font-weight: 700;
+                }
+                .action-chip.primary {
+                  background: linear-gradient(135deg, var(--admin-primary), var(--admin-primary-2));
+                  color: #fff;
+                  border-color: transparent;
+                }
+                .action-chip:hover { transform: translateY(-1px); color: inherit; }
+                .ops-card { padding: 1.25rem; }
+                .ops-title { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--admin-muted); font-weight: 800; }
+                .ops-metric-list { display: grid; gap: 0.9rem; margin-top: 1rem; }
+                .ops-metric {
+                  display: flex;
+                  justify-content: space-between;
+                  gap: 1rem;
+                  padding: 0.85rem 0;
+                  border-bottom: 1px solid var(--admin-line);
+                }
+                .ops-metric:last-child { border-bottom: none; }
+                .ops-metric strong { display: block; font-size: 1.1rem; }
+                .ops-metric span { color: var(--admin-muted); font-size: 0.9rem; }
+                .control-strip {
+                  display: grid;
+                  grid-template-columns: repeat(4, minmax(0, 1fr));
+                  gap: 1rem;
+                  margin: 1.5rem 0 1rem;
+                }
+                .control-tile {
+                  background: rgba(255,255,255,0.85);
+                  border: 1px solid rgba(19,33,47,0.08);
+                  border-radius: 22px;
+                  box-shadow: 0 14px 30px rgba(27,39,51,0.06);
+                  padding: 1rem 1.1rem;
+                }
+                .control-tile .meta { color: var(--admin-muted); font-size: 0.82rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+                .control-tile .value { margin-top: 0.45rem; font-size: 1.9rem; font-weight: 800; letter-spacing: -0.04em; }
+                .control-tile .hint { margin-top: 0.25rem; color: var(--admin-muted); font-size: 0.92rem; }
+                .card {
+                  border: 1px solid rgba(19,33,47,0.08) !important;
+                  border-radius: 24px !important;
+                  box-shadow: 0 16px 40px rgba(27,39,51,0.07) !important;
+                  background: rgba(255,255,255,0.86);
+                  backdrop-filter: blur(14px);
+                }
+                .card-header {
+                  background: transparent !important;
+                  border-bottom: 1px solid var(--admin-line) !important;
+                  padding: 1.1rem 1.25rem !important;
+                }
+                .card-title { font-weight: 800; letter-spacing: -0.02em; }
+                .table thead th {
+                  background: rgba(19,33,47,0.04) !important;
+                  color: var(--admin-muted);
+                  font-size: 0.78rem;
+                  text-transform: uppercase;
+                  letter-spacing: 0.08em;
+                  border-bottom: 1px solid var(--admin-line) !important;
+                }
+                .table > :not(caption) > * > * {
+                  padding: 1rem 1rem;
+                  border-bottom-color: rgba(19,33,47,0.06);
+                }
+                .table-hover tbody tr:hover { background: rgba(15,118,110,0.04); }
+                .btn-primary {
+                  background: linear-gradient(135deg, var(--admin-primary), var(--admin-primary-2));
+                  border-color: transparent;
+                  box-shadow: 0 10px 24px rgba(15,118,110,0.22);
+                }
+                .btn-outline-primary {
+                  border-color: rgba(15,118,110,0.28);
+                  color: var(--admin-primary-2);
+                }
+                .btn-link { text-decoration: none; }
+                .text-muted, small.text-muted, .small.text-muted, .form-label.text-secondary, .footer a {
+                  color: #445565 !important;
+                }
+                .text-secondary {
+                  color: #445565 !important;
+                }
+                .badge.bg-warning, .badge.bg-danger, .badge.bg-info, .badge.bg-primary, .badge.bg-success { border-radius: 999px; }
+                .badge.bg-primary { background: #0b5f5a !important; color: #ffffff !important; }
+                .badge.bg-success { background: #166534 !important; color: #ffffff !important; }
+                .badge.bg-info { background: #155e75 !important; color: #ffffff !important; }
+                .badge.bg-danger { background: #b91c1c !important; color: #ffffff !important; }
+                .badge.bg-warning { background: #facc15 !important; color: #3b2a04 !important; }
+                .bg-soft-primary { background: rgba(15,118,110,0.12) !important; color: #0b5f5a !important; }
+                .bg-soft-success { background: rgba(22,101,52,0.12) !important; color: #14532d !important; }
+                .bg-soft-info { background: rgba(21,94,117,0.12) !important; color: #164e63 !important; }
+                .bg-soft-warning { background: rgba(202,138,4,0.16) !important; color: #713f12 !important; }
+                .bg-soft-danger { background: rgba(185,28,28,0.12) !important; color: #991b1b !important; }
+                .footer { margin-top: 1.5rem; border-top: 1px solid var(--admin-line); background: transparent; }
+                .footer-body { color: var(--admin-muted); }
+                .metric-band-card {
+                  border: none !important;
+                  color: #ffffff;
+                }
+                .metric-band-card .metric-copy {
+                  color: rgba(255,255,255,0.92) !important;
+                }
+                .metric-band-card.primary {
+                  background: linear-gradient(135deg, #0b5f5a, #134e4a) !important;
+                }
+                .metric-band-card.info {
+                  background: linear-gradient(135deg, #155e75, #164e63) !important;
+                }
+                .metric-band-card.warning {
+                  background: linear-gradient(135deg, #f3d27a, #eab308) !important;
+                  color: #2f2408 !important;
+                }
+                .metric-band-card.warning .metric-copy,
+                .metric-band-card.warning h6,
+                .metric-band-card.warning h3 {
+                  color: #2f2408 !important;
+                }
+                .section-shell { margin-top: 1rem; }
+                .section-intro {
+                  display: flex;
+                  justify-content: space-between;
+                  align-items: end;
+                  gap: 1rem;
+                  margin-bottom: 1rem;
+                }
+                .section-label {
+                  display: inline-flex;
+                  align-items: center;
+                  gap: 0.45rem;
+                  color: var(--admin-primary-2);
+                  font-size: 0.82rem;
+                  font-weight: 800;
+                  letter-spacing: 0.08em;
+                  text-transform: uppercase;
+                }
+                .section-headline {
+                  margin-top: 0.4rem;
+                  font-size: clamp(1.5rem, 2vw, 2.2rem);
+                  line-height: 1.05;
+                  letter-spacing: -0.04em;
+                }
+                .section-copy {
+                  margin: 0.45rem 0 0;
+                  color: var(--admin-muted);
+                  max-width: 62ch;
+                  line-height: 1.7;
+                }
+                .section-meta {
+                  display: flex;
+                  flex-wrap: wrap;
+                  gap: 0.65rem;
+                  justify-content: flex-end;
+                }
+                .meta-pill {
+                  display: inline-flex;
+                  align-items: center;
+                  min-height: 42px;
+                  padding: 0.7rem 0.95rem;
+                  background: rgba(255,255,255,0.85);
+                  border: 1px solid rgba(19,33,47,0.08);
+                  border-radius: 999px;
+                  color: var(--admin-muted);
+                  font-weight: 700;
+                }
+                .insight-grid {
+                  display: grid;
+                  grid-template-columns: repeat(3, minmax(0, 1fr));
+                  gap: 1rem;
+                  margin-bottom: 1rem;
+                }
+                .insight-card {
+                  background: linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,255,255,0.84));
+                  border: 1px solid rgba(19,33,47,0.08);
+                  border-radius: 22px;
+                  padding: 1rem 1.1rem;
+                  box-shadow: 0 12px 28px rgba(27,39,51,0.06);
+                }
+                .insight-card .eyebrow {
+                  color: var(--admin-muted);
+                  font-size: 0.78rem;
+                  text-transform: uppercase;
+                  letter-spacing: 0.08em;
+                  font-weight: 800;
+                }
+                .insight-card .figure {
+                  margin-top: 0.5rem;
+                  font-size: 1.75rem;
+                  font-weight: 800;
+                  letter-spacing: -0.04em;
+                }
+                .insight-card .note {
+                  margin-top: 0.3rem;
+                  color: var(--admin-muted);
+                  font-size: 0.92rem;
+                }
+                .operator-layout {
+                  display: grid;
+                  grid-template-columns: minmax(0, 1.6fr) minmax(300px, 0.9fr);
+                  gap: 1rem;
+                }
+                .operator-stack {
+                  display: grid;
+                  gap: 1rem;
+                }
+                .utility-panel {
+                  background: linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,255,255,0.86));
+                  border: 1px solid rgba(19,33,47,0.08);
+                  border-radius: 24px;
+                  padding: 1.15rem;
+                  box-shadow: 0 12px 28px rgba(27,39,51,0.06);
+                }
+                .utility-panel h5 {
+                  font-size: 1.02rem;
+                  font-weight: 800;
+                  margin-bottom: 0.35rem;
+                }
+                .utility-panel p {
+                  color: var(--admin-muted);
+                  line-height: 1.7;
+                  margin-bottom: 1rem;
+                }
+                .signal-list {
+                  display: grid;
+                  gap: 0.75rem;
+                }
+                .signal-item {
+                  display: flex;
+                  justify-content: space-between;
+                  gap: 1rem;
+                  padding: 0.9rem 0;
+                  border-bottom: 1px solid var(--admin-line);
+                }
+                .signal-item:last-child { border-bottom: none; }
+                .signal-item strong { display: block; }
+                .signal-item span { color: var(--admin-muted); font-size: 0.92rem; }
+                .signal-item .chip {
+                  white-space: nowrap;
+                  font-weight: 800;
+                  color: var(--admin-primary-2);
+                }
+                #liveToast {
+                  border-radius: 18px;
+                  background: rgba(255,255,255,0.95);
+                  backdrop-filter: blur(14px);
+                }
+                @media (prefers-reduced-motion: reduce) {
+                  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+                }
+                @media (max-width: 1100px) {
+                  .top-summary-grid, .control-strip, .insight-grid, .operator-layout { grid-template-columns: 1fr; }
+                  .hero-title { max-width: none; }
+                  .section-intro { align-items: start; flex-direction: column; }
+                  .section-meta { justify-content: flex-start; }
+                }
+                @media (max-width: 768px) {
+                  .action-row { flex-direction: column; }
+                  .action-chip { width: 100%; }
+                }
               </style>
           </head>
           <body class="  " data-bs-spy="scroll" data-bs-target="#elements-section" data-bs-offset="0">
@@ -392,11 +654,12 @@ export const AdminController = {
                             <div class="col-md-12">
                                 <div class="flex-wrap d-flex justify-content-between align-items-center">
                                     <div>
-                                        <h1>Tableau de Bord J+SERVICE</h1>
-                                        <p>Gestion unifiée des licences, revenus et partenaires revendeurs.</p>
+                                        <span class="hero-kicker">Control Plane multi-app en direct</span>
+                                        <h1 class="hero-title">Pilote les ventes, licences et opérations sans friction.</h1>
+                                        <p class="hero-copy">Une interface de supervision pensée pour l’action: signaux critiques, opérations partenaires, lots de licences et suivi business dans un seul panneau lisible et accessible.</p>
                                     </div>
                                     <div>
-                                        <a href="/admin/api/export" class="btn btn-link btn-soft-light">
+                                        <a href="/admin/api/export" class="btn btn-link btn-soft-light action-chip">
                                             <svg width="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" class="icon-20"><path d="M11.8251 15.2171H12.1748C14.0987 15.2171 15.731 13.985 16.3054 12.2764C16.3887 12.0276 16.1979 11.7703 15.9334 11.7703H14.8962C14.7764 11.7703 14.6592 11.7154 14.5815 11.6217L12.7357 9.39055C12.3533 8.92842 11.6467 8.92842 11.2642 9.39055L9.41846 11.6217C9.34076 11.7154 9.22359 11.7703 9.10377 11.7703H8.06659C7.80204 11.7703 7.61133 12.0276 7.69457 12.2764C8.26896 13.985 9.90124 15.2171 11.8251 15.2171Z" fill="currentColor"></path><path opacity="0.4" d="M16.0811 18.3405H7.91885C6.33778 18.3405 5.05141 17.0543 5.05141 15.4732V6.6211C5.05141 5.04003 6.33778 3.75386 7.91885 3.75386H16.0811C17.6622 3.75386 18.9485 5.04003 18.9485 6.6211V15.4732C18.9485 17.0543 17.6622 18.3405 16.0811 18.3405Z" fill="currentColor"></path></svg>
                                             Exporter les données
                                         </a>
@@ -412,6 +675,64 @@ export const AdminController = {
               </div>
 
               <div class="content-inner container-fluid pb-0" id="page-content">
+                <div class="top-summary-grid">
+                    <section class="hero-card" aria-label="Synthèse opérationnelle">
+                        <div class="action-row">
+                            <a class="action-chip primary" href="javascript:void(0);" onclick="switchTab('licenses', document.querySelector('[onclick*=licenses]'))">Générer des licences</a>
+                            <a class="action-chip" href="javascript:void(0);" onclick="switchTab('marketing', document.querySelector('[onclick*=marketing]'))">Traiter les retraits</a>
+                            <a class="action-chip" href="javascript:void(0);" onclick="switchTab('logs', document.getElementById('notificationDrop'))">Voir l’audit</a>
+                        </div>
+                    </section>
+                    <aside class="ops-card" aria-label="File prioritaire">
+                        <div class="ops-title">Priorités immédiates</div>
+                        <div class="ops-metric-list">
+                            <div class="ops-metric">
+                                <div>
+                                    <strong>${data.marketing.payouts.length}</strong>
+                                    <span>Retraits en attente</span>
+                                </div>
+                                <span>${data.marketing.payouts.length > 0 ? 'Action requise' : 'RAS'}</span>
+                            </div>
+                            <div class="ops-metric">
+                                <div>
+                                    <strong>${data.lowStock.length}</strong>
+                                    <span>Stocks critiques</span>
+                                </div>
+                                <span>${data.lowStock.length > 0 ? 'Surveiller' : 'Stable'}</span>
+                            </div>
+                            <div class="ops-metric">
+                                <div>
+                                    <strong>${data.auditLogs.length}</strong>
+                                    <span>Événements d’audit récents</span>
+                                </div>
+                                <span>Traçabilité</span>
+                            </div>
+                        </div>
+                    </aside>
+                </div>
+
+                <div class="control-strip" aria-label="Indicateurs principaux">
+                    <div class="control-tile">
+                        <div class="meta">Clients</div>
+                        <div class="value">${data.stats.clients || data.stats.managers}</div>
+                        <div class="hint">tenants suivis sur la plateforme</div>
+                    </div>
+                    <div class="control-tile">
+                        <div class="meta">Volume</div>
+                        <div class="value">${new Intl.NumberFormat().format(data.stats.volume)}</div>
+                        <div class="hint">FCFA encaissés</div>
+                    </div>
+                    <div class="control-tile">
+                        <div class="meta">Transactions</div>
+                        <div class="value">${data.stats.tx}</div>
+                        <div class="hint">opérations validées</div>
+                    </div>
+                    <div class="control-tile">
+                        <div class="meta">Engagement</div>
+                        <div class="value">${(((data.stats.active_clients || data.stats.active) / ((data.stats.clients || data.stats.managers) || 1)) * 100).toFixed(1)}%</div>
+                        <div class="hint">clients actifs</div>
+                    </div>
+                </div>
                 
                 <!-- SECTION DASHBOARD -->
                 <div id="section-dashboard" class="tab-section">
@@ -423,7 +744,7 @@ export const AdminController = {
                                         <div class="card-body bg-soft-primary">
                                             <div class="d-flex align-items-center justify-content-between mb-2">
                                                 <div>
-                                                    <h6 class="text-primary mb-0">Total Gérants</h6>
+                                                    <h6 class="text-primary mb-0">Total Clients</h6>
                                                 </div>
                                                 <div class="bg-primary rounded p-2 text-white">
                                                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -433,7 +754,7 @@ export const AdminController = {
                                                 </div>
                                             </div>
                                             <div class="d-flex align-items-center justify-content-between mt-3">
-                                                 <h2 class="counter text-primary fw-bolder mb-0" id="val-managers">${data.stats.managers}</h2>
+                                                 <h2 class="counter text-primary fw-bolder mb-0" id="val-managers">${data.stats.clients || data.stats.managers}</h2>
                                                 <span class="badge bg-primary text-white">+12%</span>
                                             </div>
                                         </div>
@@ -496,7 +817,7 @@ export const AdminController = {
                                                 </div>
                                             </div>
                                             <div class="d-flex align-items-center justify-content-between mt-3">
-                                                 <h3 class="counter text-warning fw-bolder mb-0" id="val-ret">${((data.stats.active / (data.stats.managers || 1)) * 100).toFixed(1)}%</h3>
+                                                 <h3 class="counter text-warning fw-bolder mb-0" id="val-ret">${(((data.stats.active_clients || data.stats.active) / ((data.stats.clients || data.stats.managers) || 1)) * 100).toFixed(1)}%</h3>
                                                 <span class="badge bg-warning text-white">Actifs</span>
                                             </div>
                                         </div>
@@ -553,7 +874,7 @@ export const AdminController = {
                                         <table class="table table-hover mb-0">
                                             <thead class="bg-light">
                                                 <tr>
-                                                    <th>ID Gérant</th>
+                                                    <th>ID Client</th>
                                                     <th>Email</th>
                                                     <th>Montant Payé</th>
                                                     <th>Status</th>
@@ -563,7 +884,7 @@ export const AdminController = {
                                             <tbody id="table-licenses">
                                                 ${data.licenses.map(l => `
                                                     <tr>
-                                                        <td><code>#${l.manager_id}</code></td>
+                                                        <td><code>#${l.client_id || l.manager_id}</code></td>
                                                         <td>${l.email}</td>
                                                         <td><span class="text-success fw-bold">${new Intl.NumberFormat().format(l.amount)}</span> <small>FCFA</small></td>
                                                         <td><span class="badge bg-soft-success">Payé</span></td>
@@ -581,9 +902,37 @@ export const AdminController = {
 
                 <!-- GESTION DES LICENCES -->
                 <div id="section-licenses" class="tab-section d-none">
-                    <div class="row">
-                        <!-- Générateur -->
-                        <div class="col-lg-12">
+                    <section class="section-shell">
+                        <div class="section-intro">
+                            <div>
+                                <span class="section-label">License Operations</span>
+                                <h2 class="section-headline">Usine de génération et traçabilité des lots</h2>
+                                <p class="section-copy">Crée des lots, surveille le stock produit et garde une visibilité immédiate sur les licences récemment générées.</p>
+                            </div>
+                            <div class="section-meta">
+                                <span class="meta-pill">${data.batches.length} lots récents</span>
+                                <span class="meta-pill">${data.licenses.length} activations visibles</span>
+                            </div>
+                        </div>
+                        <div class="insight-grid">
+                            <div class="insight-card">
+                                <div class="eyebrow">Lots récents</div>
+                                <div class="figure">${data.batches.length}</div>
+                                <div class="note">suivis dans l’historique de production</div>
+                            </div>
+                            <div class="insight-card">
+                                <div class="eyebrow">Ventes licences</div>
+                                <div class="figure">${data.licenses.length}</div>
+                                <div class="note">remontées dans le panneau principal</div>
+                            </div>
+                            <div class="insight-card">
+                                <div class="eyebrow">Mode de flux</div>
+                                <div class="figure">Manuel</div>
+                                <div class="note">génération batch pilotée depuis l’admin</div>
+                            </div>
+                        </div>
+                        <div class="operator-layout">
+                            <div class="operator-stack">
                             <div class="card" data-aos="fade-up" data-aos-delay="200">
                                 <div class="card-header d-flex justify-content-between align-items-center">
                                     <h4 class="card-title mb-0">Usine à Licences</h4>
@@ -625,10 +974,6 @@ export const AdminController = {
                                     </form>
                                 </div>
                             </div>
-                        </div>
-                        
-                        <!-- Historique des Licences -->
-                        <div class="col-lg-12 mt-4">
                             <div class="card" data-aos="fade-up" data-aos-delay="400">
                                 <div class="card-header d-flex justify-content-between">
                                     <h4 class="card-title">Stock Récent Généré</h4>
@@ -664,46 +1009,86 @@ export const AdminController = {
                                     </div>
                                 </div>
                             </div>
+                            </div>
+                            <aside class="utility-panel" data-aos="fade-up" data-aos-delay="280">
+                                <h5>Checklist opérateur</h5>
+                                <p>Avant de générer un lot, vérifie le produit, la quantité, le préfixe et l’usage attendu. Cette zone sert de rappel opérationnel pour éviter les lots inutilisables.</p>
+                                <div class="signal-list">
+                                    <div class="signal-item">
+                                        <div>
+                                            <strong>Préfixe lisible</strong>
+                                            <span>utilise un code parlant pour support et marketing</span>
+                                        </div>
+                                        <span class="chip">Qualité</span>
+                                    </div>
+                                    <div class="signal-item">
+                                        <div>
+                                            <strong>Quantité maîtrisée</strong>
+                                            <span>évite les batches trop grands si la diffusion est progressive</span>
+                                        </div>
+                                        <span class="chip">Stock</span>
+                                    </div>
+                                    <div class="signal-item">
+                                        <div>
+                                            <strong>Export immédiat</strong>
+                                            <span>exporte les données si le lot doit partir vers un autre canal</span>
+                                        </div>
+                                        <span class="chip">Ops</span>
+                                    </div>
+                                </div>
+                            </aside>
                         </div>
-                    </div>
+                    </section>
                 </div>
 
                 <!-- MARKETING AFFILIES -->
                 <div id="section-marketing" class="tab-section d-none">
+                    <section class="section-shell">
+                    <div class="section-intro">
+                        <div>
+                            <span class="section-label">Reseller Marketing</span>
+                            <h2 class="section-headline">Resellers, commissions et retraits en une seule vue</h2>
+                            <p class="section-copy">Priorise les demandes de retrait, garde l’œil sur la performance des revendeurs et prépare les actions de croissance sans perdre le contexte financier.</p>
+                        </div>
+                        <div class="section-meta">
+                            <span class="meta-pill">${data.marketing.totalResellers} revendeurs</span>
+                            <span class="meta-pill">${data.marketing.payouts.length} retraits à traiter</span>
+                        </div>
+                    </div>
                     <div class="row">
                         <div class="col-md-12 col-lg-4">
-                            <div class="card bg-primary text-white" data-aos="fade-up" data-aos-delay="200">
+                            <div class="card metric-band-card primary" data-aos="fade-up" data-aos-delay="200">
                                 <div class="card-body">
-                                    <h6 class="mb-3 text-white">Commissions Distribuées (Mois)</h6>
+                                    <h6 class="mb-3">Commissions Distribuées (Mois)</h6>
                                     <h3>${new Intl.NumberFormat('fr-FR').format(data.marketing.totalCommissions)} FCFA</h3>
-                                    <p class="mb-0 text-white-50">Ce mois-ci</p>
+                                    <p class="mb-0 metric-copy">Ce mois-ci</p>
                                 </div>
                             </div>
                         </div>
                         <div class="col-md-12 col-lg-4">
-                            <div class="card bg-info text-white" data-aos="fade-up" data-aos-delay="300">
+                            <div class="card metric-band-card info" data-aos="fade-up" data-aos-delay="300">
                                 <div class="card-body">
-                                    <h6 class="mb-3 text-white">Nombre d'Affiliés Actifs</h6>
+                                    <h6 class="mb-3">Nombre de Resellers Actifs</h6>
                                     <h3>${data.marketing.totalResellers} Revendeur(s)</h3>
-                                    <p class="mb-0 text-white-50">Enregistrés sur la plateforme</p>
+                                    <p class="mb-0 metric-copy">Enregistrés sur la plateforme</p>
                                 </div>
                             </div>
                         </div>
                         <div class="col-md-12 col-lg-4">
-                            <div class="card bg-warning text-white" data-aos="fade-up" data-aos-delay="400">
+                            <div class="card metric-band-card warning" data-aos="fade-up" data-aos-delay="400">
                                 <div class="card-body">
-                                    <h6 class="mb-3 text-white">Taux de Conversion Global</h6>
+                                    <h6 class="mb-3">Taux de Conversion Global</h6>
                                     <h3>--- %</h3>
-                                    <p class="mb-0 text-white-50">Pas assez de données</p>
+                                    <p class="mb-0 metric-copy">Pas assez de données</p>
                                 </div>
                             </div>
                         </div>
                     </div>
 
                     <div class="row mt-4">
-                        <div class="col-lg-8">
+                        <div class="col-lg-8 operator-stack">
                             <div class="card" data-aos="fade-up" data-aos-delay="500">
-                                <div class="card-header"><h4 class="card-title">Top Partenaires Revendeurs</h4></div>
+                                <div class="card-header"><h4 class="card-title">Top Resellers</h4></div>
                                 <div class="card-body p-0">
                                     <ul class="list-group list-group-flush">
                                         ${data.marketing.topResellers && data.marketing.topResellers.length > 0 ? Object.values(data.marketing.topResellers).map(r => `
@@ -733,7 +1118,7 @@ export const AdminController = {
                                         <table class="table table-hover mb-0">
                                             <thead class="bg-light">
                                                 <tr>
-                                                    <th>Partenaire</th>
+                                                    <th>Reseller</th>
                                                     <th>Montant</th>
                                                     <th>Compte (N°)</th>
                                                     <th>Opérateur</th>
@@ -762,12 +1147,13 @@ export const AdminController = {
                             </div>
                         </div>
                         <div class="col-lg-4">
-                            <div class="card" data-aos="fade-up" data-aos-delay="600">
-                                <div class="card-header"><h4 class="card-title">Créer Lien Partenaire</h4></div>
-                                <div class="card-body">
+                            <div class="utility-panel" data-aos="fade-up" data-aos-delay="600">
+                                <h5>Créer Lien Reseller</h5>
+                                <p>Prépare un revendeur, calibre la commission et génère un lien d’invitation cohérent avec ta politique d’acquisition.</p>
+                                <div class="card-body p-0">
                                     <div class="mb-3">
-                                        <label class="form-label">Pseudo Revendeur</label>
-                                        <input type="text" class="form-control" placeholder="ex: superpartner">
+                                        <label class="form-label">Alias Reseller</label>
+                                        <input type="text" class="form-control" placeholder="ex: superreseller">
                                     </div>
                                     <div class="mb-3">
                                         <label class="form-label">Commission (%)</label>
@@ -776,13 +1162,42 @@ export const AdminController = {
                                     </div>
                                     <button class="btn btn-primary w-100">Générer le lien invité</button>
                                 </div>
+                                <div class="signal-list mt-4">
+                                    <div class="signal-item">
+                                        <div>
+                                            <strong>Commission par défaut</strong>
+                                            <span>${data.config.global_commission_rate || 15}% global côté plateforme</span>
+                                        </div>
+                                        <span class="chip">Référence</span>
+                                    </div>
+                                    <div class="signal-item">
+                                        <div>
+                                            <strong>Commissions du mois</strong>
+                                            <span>${new Intl.NumberFormat('fr-FR').format(data.marketing.totalCommissions)} FCFA distribués</span>
+                                        </div>
+                                        <span class="chip">Finance</span>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
+                    </section>
                 </div>
 
                  <!-- CONFIGURATION -->
                  <div id="section-settings" class="tab-section d-none">
+                     <section class="section-shell">
+                     <div class="section-intro">
+                         <div>
+                             <span class="section-label">Platform Settings</span>
+                             <h2 class="section-headline">Réglages globaux, sécurité et politiques de tarification</h2>
+                             <p class="section-copy">Centralise les paramètres sensibles du backend, les politiques tarifaires et les limites d’exploitation dans un espace plus lisible pour l’équipe ops.</p>
+                         </div>
+                         <div class="section-meta">
+                             <span class="meta-pill">Maintenance: ${data.config.maintenance_mode === true ? 'active' : 'inactive'}</span>
+                             <span class="meta-pill">Commission par défaut: ${data.config.global_commission_rate || 15}%</span>
+                         </div>
+                     </div>
                      <div class="row">
                          <div class="col-lg-6" data-aos="fade-up" data-aos-delay="200">
                              <div class="card">
@@ -853,11 +1268,24 @@ export const AdminController = {
                              </div>
                          </div>
                      </div>
+                     </section>
                  </div>
 
 
                <!-- SECTION LOGS & AUDIT -->
                <div id="section-logs" class="tab-section d-none">
+                   <section class="section-shell">
+                   <div class="section-intro">
+                       <div>
+                           <span class="section-label">Audit Trail</span>
+                           <h2 class="section-headline">Journal d’audit, événements critiques et traces opérateur</h2>
+                           <p class="section-copy">Consulte les actions sensibles, les changements d’état et les signaux système récents pour garder un historique exploitable par support, finance et exploitation.</p>
+                       </div>
+                       <div class="section-meta">
+                           <span class="meta-pill">${data.auditLogs.length} événements chargés</span>
+                           <span class="meta-pill">Realtime ${data.auditLogs.length > 0 ? 'actif' : 'prêt'}</span>
+                       </div>
+                   </div>
                    <div class="card shadow-sm border-0">
                        <div class="card-header d-flex justify-content-between align-items-center bg-transparent border-bottom">
                            <div class="header-title">
@@ -896,6 +1324,7 @@ export const AdminController = {
                            </div>
                        </div>
                    </div>
+                   </section>
                </div>
                </div>
 
@@ -1007,7 +1436,7 @@ export const AdminController = {
                 try {
                   const r = await fetch('/admin/api/stats');
                   const d = await r.json();
-                  document.getElementById('val-managers').innerText = d.stats.managers;
+                  document.getElementById('val-managers').innerText = d.stats.clients || d.stats.managers;
                   document.getElementById('val-volume').innerText = new Intl.NumberFormat().format(d.stats.volume);
                   document.getElementById('val-tx').innerText = d.stats.tx;
                   

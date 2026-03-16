@@ -3,36 +3,27 @@ import helmet from 'helmet';
 import cors from 'cors';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
-import pino from 'pino';
 import rateLimit from 'express-rate-limit';
 import cookieParser from 'cookie-parser';
 import { errorHandler, notFoundHandler } from './middlewares/errorHandler.js';
+import { logger } from './config/logger.js';
 
 // Importation des routes
 import voucherRoutes from './routes/voucherRoutes.js';
 import paymentRoutes from './routes/paymentRoutes.js';
 import webhookRoutes from './routes/webhookRoutes.js';
-import managerRoutes from './routes/managerRoutes.js';
+import clientRoutes from './routes/clientRoutes.js';
 import salesRoutes from './routes/salesRoutes.js';
 import licenseRoutes from './routes/licenseRoutes.js';
 import reportRoutes from './routes/reportRoutes.js';
 import adminRoutes from './routes/admin/adminRoutes.js';
-import partnerRoutes from './routes/partner/partnerRoutes.js';
+import resellerRoutes from './routes/resellerRoutes.js';
 
 // Services
 import { CronService } from './services/cronService.js';
 
 // Variables d'environnement
 dotenv.config();
-
-// Initialisation Logger (Observabilité Enterprise Grade)
-const logger = pino({
-  level: process.env.NODE_ENV === 'development' ? 'debug' : 'info',
-  transport: process.env.NODE_ENV === 'development' ? {
-    target: 'pino-pretty',
-    options: { colorize: true }
-  } : undefined
-});
 
 const app = express();
 
@@ -57,7 +48,7 @@ app.use(helmet({
 // Définir ALLOWED_ORIGINS dans .env : "https://monsite.com,https://app.monsite.com"
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',')
-  : ['http://localhost:3000', 'http://localhost:5173'];
+  : ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:3001', 'http://127.0.0.1:3001', 'http://localhost:5173'];
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -114,12 +105,14 @@ app.get('/api/config/public', (req, res) => {
 app.use('/admin', adminRoutes); // Interface de gestion Administrative
 app.use('/api/v1/licenses', licenseRoutes); // Vente de licences SaaS
 app.use('/api/v1/reports', reportRoutes);   // 🚩 Rapports Multi-Apps (Jeux, WiFi, etc.)
-app.use('/api/v1/managers', managerRoutes); // Routes GERANT (Onboarding/Config)
+app.use('/api/v1/clients', clientRoutes); // Route canonique client
+app.use('/api/v1/managers', clientRoutes); // Compatibilité legacy
 app.use('/api/v1/vouchers', voucherRoutes);
 app.use('/api/v1/sales', salesRoutes); // Routes VENTES & STATS
 app.use('/api/v1/payments', paymentRoutes); // Routes PAIEMENT (HTML)
 app.use('/api/v1/webhooks', webhookRoutes); // Routes WEBHOOK (API Server-to-Server)
-app.use('/partners', partnerRoutes); // 🆕 ESPACE PARTENAIRES J+SERVICE
+app.use('/resellers', resellerRoutes); // Route canonique reseller
+app.use('/partners', resellerRoutes); // Compatibilité legacy
 
 // Catch 404 (Route non trouvée)
 app.use(notFoundHandler);

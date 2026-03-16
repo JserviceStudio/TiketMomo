@@ -4,7 +4,7 @@ export const TransactionModel = {
   /**
    * Récupère la liste des transactions d'un gérant (Historique des ventes / Dashboard)
    */
-  async getTransactionsByManager(managerId, limit = 50, offset = 0) {
+  async getTransactionsByClient(clientId, limit = 50, offset = 0) {
     const { data, error } = await supabaseAdmin
       .from('transactions')
       .select(`
@@ -14,7 +14,7 @@ export const TransactionModel = {
         created_at, 
         vouchers (profile, code)
       `)
-      .eq('manager_id', managerId)
+      .eq('manager_id', clientId)
       .order('created_at', { ascending: false })
       .range(offset, offset + limit - 1);
 
@@ -34,11 +34,11 @@ export const TransactionModel = {
   /**
    * Calcul des statistiques financières pour l'application mobile (CA, Nbre ventes)
    */
-  async getSalesStats(managerId) {
+  async getSalesStats(clientId) {
     const { data, error } = await supabaseAdmin
       .from('transactions')
       .select('amount')
-      .eq('manager_id', managerId)
+      .eq('manager_id', clientId)
       .eq('status', 'SUCCESS');
 
     if (error) {
@@ -57,14 +57,14 @@ export const TransactionModel = {
   /**
    * Vérifie le niveau de stock (tickets restants) pour CHAQUE profil de ce gérant
    */
-  async getStockLevels(managerId) {
+  async getStockLevels(clientId) {
     // Note: Supabase n'a pas de GROUP BY direct simple via .select(). 
     // On peut utiliser une vue SQL ou une fonction RPC, ou le faire en JS pour les petites quantités.
     // Ici, on récupère tout et on groupe en JS pour la simplicité, car le nombre de profils est restreint.
     const { data, error } = await supabaseAdmin
       .from('vouchers')
       .select('profile')
-      .eq('manager_id', managerId)
+      .eq('manager_id', clientId)
       .eq('used', false);
 
     if (error) {
@@ -83,3 +83,5 @@ export const TransactionModel = {
     }));
   }
 };
+
+TransactionModel.getTransactionsByManager = TransactionModel.getTransactionsByClient;

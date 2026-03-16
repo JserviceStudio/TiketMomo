@@ -1,101 +1,39 @@
-import { supabaseAdmin } from '../../config/supabase.js';
-import crypto from 'crypto';
-import bcrypt from 'bcrypt';
-import jwt from 'jsonwebtoken';
-import levenshtein from 'fast-levenshtein';
+import { ResellerPortalService } from '../../modules/partner-marketing/services/partnerPortalService.js';
 
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-    console.error('❌ ERREUR FATALE : JWT_SECRET est manquant dans le fichier .env. Arrêt du serveur.');
-    process.exit(1);
-}
-
-export const PartnerController = {
+export const ResellerController = {
     /**
      * 🚪 RENDER LOGIN/REGISTER PAGE
      */
     renderAuth(req, res) {
-        res.send(PartnerController._generateAuthHTML());
+        res.send(ResellerController._generateAuthHTML());
     },
 
     /**
-     * 📝 REGISTER PARTNER
+     * 📝 REGISTER RESELLER
      */
     async register(req, res) {
         try {
             const { name, email, password, phone, promo_code } = req.body;
-
-            if (!name || !email || !password || !phone) {
-                return res.status(400).json({ success: false, error: 'Champs obligatoires manquants.' });
-            }
-
-            // 1. Vérifier si l'email existe déjà dans Supabase
-            const { data: existing, error: checkError } = await supabaseAdmin
-                .from('resellers')
-                .select('id')
-                .eq('email', email)
-                .single();
-
-            if (existing) return res.status(400).json({ success: false, error: 'Cet email est déjà utilisé.' });
-
-            // 2. Gérer le code promo
-            let finalCode = (promo_code || `JPLUS-${crypto.randomBytes(3).toString('hex').toUpperCase()}`).toUpperCase();
-
-            // Vérifier l'unicité et la SIMILARITÉ
-            const { data: allPartners, error: fetchError } = await supabaseAdmin
-                .from('resellers')
-                .select('promo_code');
-
-            if (!fetchError && allPartners) {
-                for (const row of allPartners) {
-                    const distance = levenshtein.get(finalCode, row.promo_code);
-                    if (distance === 0) return res.status(400).json({ success: false, error: 'Ce code promo est déjà pris.' });
-                    if (distance < 2) return res.status(400).json({ success: false, error: 'Ce code est trop similaire à un code existant.' });
-                }
-            }
-
-            const hashedPassword = await bcrypt.hash(password, 10);
-            const partnerId = `res_${crypto.randomBytes(8).toString('hex')}`;
-
-            const { error: insertError } = await supabaseAdmin
-                .from('resellers')
-                .insert([{
-                    id: partnerId,
-                    name,
-                    email,
-                    password: hashedPassword,
-                    phone,
-                    promo_code: finalCode,
-                    commission_rate: 10.00,
-                    balance: 0.00
-                }]);
-
-            if (insertError) throw insertError;
-
+            await ResellerPortalService.registerReseller({
+                name,
+                email,
+                password,
+                phone,
+                promoCode: promo_code
+            });
             res.json({ success: true, message: 'Inscription réussie ! Connectez-vous.' });
         } catch (error) {
-            res.status(500).json({ success: false, error: error.message });
+            res.status(error.statusCode || 500).json({ success: false, error: error.message });
         }
     },
 
     /**
-     * 🔑 LOGIN PARTNER
+     * 🔑 LOGIN RESELLER
      */
     async login(req, res) {
         try {
             const { email, password } = req.body;
-            const { data: partner, error } = await supabaseAdmin
-                .from('resellers')
-                .select('id, name, email, password, phone, promo_code, commission_rate, balance')
-                .eq('email', email)
-                .single();
-
-            if (error || !partner) return res.status(401).json({ success: false, error: 'Identifiants invalides.' });
-
-            const match = await bcrypt.compare(password, partner.password);
-            if (!match) return res.status(401).json({ success: false, error: 'Identifiants invalides.' });
-
-            const token = jwt.sign({ id: partner.id, role: 'partner' }, JWT_SECRET, { expiresIn: '7d' });
+            const { token } = await ResellerPortalService.authenticateReseller({ email, password });
             res.cookie('partner_token', token, {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === 'production',
@@ -104,7 +42,8 @@ export const PartnerController = {
             });
             res.json({ success: true });
         } catch (error) {
-            res.status(500).json({ success: false, error: error.message });
+            const statusCode = error.message === 'Identifiants invalides.' ? 401 : (error.statusCode || 500);
+            res.status(statusCode).json({ success: false, error: error.message });
         }
     },
 
@@ -113,28 +52,24 @@ export const PartnerController = {
      */
     async getDashboard(req, res) {
         try {
-            const partnerId = req.user.id;
-
-            const [partnerRes, salesRes, payoutsRes] = await Promise.all([
-                supabaseAdmin.from('resellers').select('*').eq('id', partnerId).single(),
-                supabaseAdmin.from('commission_logs').select('*, transactions(created_at)').eq('reseller_id', partnerId).order('created_at', { ascending: false }).limit(10),
-                supabaseAdmin.from('payout_requests').select('*').eq('reseller_id', partnerId).order('created_at', { ascending: false })
-            ]);
-
-            if (partnerRes.error) throw partnerRes.error;
-
-            const sales = (salesRes.data || []).map(s => ({
-                ...s,
-                sale_date: s.transactions?.created_at || s.created_at
-            }));
-
-            res.send(PartnerController._generateDashboardHTML({
-                partner: partnerRes.data,
-                sales,
-                payouts: payoutsRes.data || []
-            }));
+            const resellerId = req.user.id;
+            const data = await ResellerPortalService.getResellerDashboard(resellerId);
+            res.send(ResellerController._generateDashboardHTML(data));
         } catch (error) {
             res.status(500).send('Erreur: ' + error.message);
+        }
+    },
+
+    async getDashboardAPI(req, res) {
+        try {
+            const resellerId = req.user.id;
+            const data = await ResellerPortalService.getResellerDashboard(resellerId);
+            res.json({ success: true, data });
+        } catch (error) {
+            res.status(error.statusCode || 500).json({
+                success: false,
+                error: error.message
+            });
         }
     },
 
@@ -144,28 +79,11 @@ export const PartnerController = {
     async updatePromoCode(req, res) {
         try {
             const { newCode } = req.body;
-            const partnerId = req.user.id;
-            const normalizedCode = newCode.toUpperCase();
-
-            if (!newCode || newCode.length < 3) return res.status(400).json({ success: false, error: 'Code trop court.' });
-
-            const { data: allCodes, error } = await supabaseAdmin
-                .from('resellers')
-                .select('promo_code')
-                .neq('id', partnerId);
-
-            if (!error && allCodes) {
-                for (const row of allCodes) {
-                    const distance = levenshtein.get(normalizedCode, row.promo_code);
-                    if (distance === 0) return res.status(400).json({ success: false, error: 'Ce code est déjà utilisé.' });
-                    if (distance < 2) return res.status(400).json({ success: false, error: 'Code trop similaire.' });
-                }
-            }
-
-            await supabaseAdmin.from('resellers').update({ promo_code: normalizedCode }).eq('id', partnerId);
+            const resellerId = req.user.id;
+            await ResellerPortalService.updatePromoCode(resellerId, newCode);
             res.json({ success: true, message: 'Code promo mis à jour !' });
         } catch (error) {
-            res.status(500).json({ success: false, error: error.message });
+            res.status(error.statusCode || 500).json({ success: false, error: error.message });
         }
     },
 
@@ -175,32 +93,11 @@ export const PartnerController = {
     async requestPayout(req, res) {
         try {
             const { amount, phone, operator } = req.body;
-            const partnerId = req.user.id;
-
-            const { data: partner, error: fetchError } = await supabaseAdmin
-                .from('resellers')
-                .select('balance')
-                .eq('id', partnerId)
-                .single();
-
-            if (fetchError || partner.balance < amount) return res.status(400).json({ success: false, error: 'Solde insuffisant.' });
-
-            const payoutId = `PAY-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-
-            // We use RPC for atomic decrement and insert
-            const { error: rpcError } = await supabaseAdmin.rpc('request_payout', {
-                p_id: payoutId,
-                p_reseller_id: partnerId,
-                p_amount: amount,
-                p_phone: phone,
-                p_operator: operator
-            });
-
-            if (rpcError) throw rpcError;
-
+            const resellerId = req.user.id;
+            await ResellerPortalService.requestPayout(resellerId, { amount, phone, operator });
             res.json({ success: true, message: 'Demande de retrait envoyée !' });
         } catch (error) {
-            res.status(500).json({ success: false, error: error.message });
+            res.status(error.statusCode || 500).json({ success: false, error: error.message });
         }
     },
 
@@ -211,7 +108,7 @@ export const PartnerController = {
         <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>J+SERVICE | Espace Partenaire</title>
+            <title>J+SERVICE | Espace Reseller</title>
             <link rel="stylesheet" href="/admin/assets/css/hope-ui.min.css">
             <style>
                 body { background: #f4f7fa; min-height: 100vh; display: flex; align-items: center; }
@@ -224,7 +121,7 @@ export const PartnerController = {
                 <div class="card-body p-5">
                     <div class="logo-circle">J+</div>
                     <div class="text-center mb-4">
-                        <h3 class="fw-bold">Espace Partenaire</h3>
+                        <h3 class="fw-bold">Espace Reseller</h3>
                         <p class="text-muted">Rejoignez J+SERVICE et gagnez des commissions</p>
                     </div>
 
@@ -291,7 +188,7 @@ export const PartnerController = {
                     const formData = new FormData(e.target);
                     const data = Object.fromEntries(formData.entries());
                     
-                    const res = await fetch(\`/partners/auth/\${type}\`, {
+                    const res = await fetch(\`/resellers/auth/\${type}\`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(data)
@@ -299,7 +196,7 @@ export const PartnerController = {
                     const result = await res.json();
                     
                     if(result.success) {
-                        if(type === 'login') window.location.href = '/partners/dashboard';
+                        if(type === 'login') window.location.href = '/resellers/dashboard';
                         else {
                             alert('Inscription réussie ! Vous pouvez vous connecter.');
                             document.getElementById('pills-login-tab').click();
@@ -313,14 +210,15 @@ export const PartnerController = {
         </html>`;
     },
 
-    _generateDashboardHTML({ partner, sales, payouts }) {
+    _generateDashboardHTML({ reseller, partner, sales, payouts }) {
+        const resellerProfile = reseller || partner;
         return `
         <!doctype html>
         <html lang="fr">
         <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>J+SERVICE | Dashboard Partenaire</title>
+            <title>J+SERVICE | Dashboard Reseller</title>
             <link rel="stylesheet" href="/admin/assets/css/hope-ui.min.css">
             <!-- Supabase JS Client for Realtime -->
             <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -334,7 +232,7 @@ export const PartnerController = {
         </head>
         <body>
             <div class="sidebar d-flex flex-column p-4">
-                <h4 class="fw-bold mb-4 text-primary">J+SERVICE <small class="text-secondary fs-6">Partner</small></h4>
+                <h4 class="fw-bold mb-4 text-primary">J+SERVICE <small class="text-secondary fs-6">Reseller</small></h4>
                 <ul class="nav nav-pills flex-column mb-auto">
                     <li class="nav-item">
                         <a href="#" class="nav-link active">Tableau de Bord</a>
@@ -342,8 +240,8 @@ export const PartnerController = {
                 </ul>
                 <hr>
                 <div class="text-muted small mb-2">Connecté en tant que:</div>
-                <div class="fw-bold mb-3">${partner.name}</div>
-                <a href="/partners/auth/logout" class="btn btn-sm btn-soft-danger w-100">Déconnexion</a>
+                <div class="fw-bold mb-3">${resellerProfile.name}</div>
+                <a href="/resellers/auth/logout" class="btn btn-sm btn-soft-danger w-100">Déconnexion</a>
             </div>
 
             <main class="main-content">
@@ -352,7 +250,7 @@ export const PartnerController = {
                         <div class="card bg-primary text-white">
                             <div class="card-body">
                                 <h6 class="text-white-50">Solde Retirable</h6>
-                                <h2 class="mb-0 text-white">${new Intl.NumberFormat().format(partner.balance)} FCFA</h2>
+                                <h2 class="mb-0 text-white">${new Intl.NumberFormat().format(resellerProfile.balance)} FCFA</h2>
                             </div>
                         </div>
                     </div>
@@ -361,7 +259,7 @@ export const PartnerController = {
                             <div class="card-body text-center">
                                 <h6 class="text-muted">Votre Code Promo</h6>
                                 <div class="d-flex align-items-center justify-content-center mt-2">
-                                    <h4 id="myCode" class="fw-bold text-dark me-3 mb-0">${partner.promo_code}</h4>
+                                    <h4 id="myCode" class="fw-bold text-dark me-3 mb-0">${resellerProfile.promo_code}</h4>
                                     <button class="btn btn-sm btn-soft-primary" onclick="changeCode()">Changer</button>
                                 </div>
                             </div>
@@ -433,16 +331,16 @@ export const PartnerController = {
 
                 // --- Supabase Realtime Setup ---
                 // Les clés publiques sont récupérées depuis l'endpoint dédié (jamais interpolées ici)
-                const partnerId = '${partner.id}';
+                const resellerId = '${resellerProfile.id}';
                 const { supabaseUrl, supabaseAnonKey } = await fetch('/api/config/public').then(r => r.json());
                 const supabaseClient = supabase.createClient(supabaseUrl, supabaseAnonKey);
 
-                const commissionChannel = supabaseClient.channel('partner_commissions')
+                const commissionChannel = supabaseClient.channel('reseller_commissions')
                     .on('postgres_changes', { 
                         event: 'INSERT', 
                         schema: 'public', 
                         table: 'commission_logs',
-                        filter: 'reseller_id=eq.' + partnerId
+                        filter: 'reseller_id=eq.' + resellerId
                     }, payload => {
                         console.log('[Realtime] Nouvelle commission !', payload);
                         alert('💰 Félicitations ! Vous venez de recevoir une nouvelle commission.');
@@ -450,12 +348,12 @@ export const PartnerController = {
                     })
                     .subscribe();
 
-                const payoutChannel = supabaseClient.channel('partner_payouts')
+                const payoutChannel = supabaseClient.channel('reseller_payouts')
                     .on('postgres_changes', { 
                         event: 'UPDATE', 
                         schema: 'public', 
                         table: 'payout_requests',
-                        filter: 'reseller_id=eq.' + partnerId
+                        filter: 'reseller_id=eq.' + resellerId
                     }, payload => {
                         console.log('[Realtime] Statut de retrait mis à jour', payload);
                         alert('📢 Le statut de votre demande de retrait a été mis à jour : ' + payload.new.status);
@@ -467,7 +365,7 @@ export const PartnerController = {
 
                 async function submitChangeCode() {
                     const newCode = document.getElementById('newCodeInput').value;
-                    const res = await fetch('/partners/api/profile/promo-code', {
+                    const res = await fetch('/resellers/api/profile/promo-code', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ newCode })
@@ -478,14 +376,14 @@ export const PartnerController = {
                 }
 
                 function showPayoutModal() {
-                    const amount = prompt("Montant à retirer (Solde: ${partner.balance} FCFA):", "${partner.balance}");
+                    const amount = prompt("Montant à retirer (Solde: ${resellerProfile.balance} FCFA):", "${resellerProfile.balance}");
                     if(!amount || amount < 500) return;
                     
                     const op = prompt("Opérateur (MTN, Moov, Wave, Orange):", "MTN");
-                    const phone = prompt("Numéro Mobile Money:", "${partner.phone}");
+                    const phone = prompt("Numéro Mobile Money:", "${resellerProfile.phone}");
 
                     if(amount && op && phone) {
-                        fetch('/api/v1/partners/payout', {
+                        fetch('/api/v1/resellers/payout', {
                             method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ amount, operator: op, phone })
@@ -500,3 +398,5 @@ export const PartnerController = {
         </html>`;
     }
 };
+
+export const PartnerController = ResellerController;

@@ -1,6 +1,60 @@
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
-import { supabase, supabaseAdmin } from '../config/supabase.js';
+import { IdentityResolver } from '../modules/identity-access/services/identityResolver.js';
+
+const ROLE_ALIASES = {
+    admin: 'admin',
+    client: 'client',
+    manager: 'client',
+    reseller: 'reseller',
+    partner: 'reseller'
+};
+
+const normalizeRole = (role, fallbackRole = null) => {
+    if (typeof role === 'string' && ROLE_ALIASES[role]) {
+        return ROLE_ALIASES[role];
+    }
+
+    if (typeof fallbackRole === 'string' && ROLE_ALIASES[fallbackRole]) {
+        return ROLE_ALIASES[fallbackRole];
+    }
+
+    return role || fallbackRole || null;
+};
+
+const buildRoleDeniedResponse = (req, res, requiredRoles) => {
+    const acceptsHtml = req.headers.accept?.includes('text/html');
+    const target = requiredRoles.includes('admin')
+        ? '/auth/admin'
+        : requiredRoles.includes('reseller')
+            ? '/auth/reseller'
+            : requiredRoles.includes('client')
+                ? '/auth/client'
+            : null;
+
+    if (acceptsHtml && target) {
+        return res.status(403).send(`<script>window.location.href="${target}";</script>`);
+    }
+
+    return res.status(403).json({
+        success: false,
+        error: {
+            code: 'FORBIDDEN_ROLE',
+            message: 'Votre rôle ne permet pas cet accès.'
+        }
+    });
+};
+
+export const requireRole = (...requiredRoles) => (req, res, next) => {
+    const normalizedRequiredRoles = requiredRoles.map((role) => normalizeRole(role)).filter(Boolean);
+    const userRole = normalizeRole(req.user?.role);
+
+    if (!userRole || !normalizedRequiredRoles.includes(userRole)) {
+        return buildRoleDeniedResponse(req, res, normalizedRequiredRoles);
+    }
+
+    return next();
+};
 
 /**
  * 🛡️ RÈGLE 1 : Middleware d'Isolation "Multi-Tenant"
@@ -8,56 +62,17 @@ import { supabase, supabaseAdmin } from '../config/supabase.js';
  */
 export const requireAuth = async (req, res, next) => {
     try {
-        const authHeader = req.headers.authorization;
-        const apiKeyHeader = req.headers['x-api-key'] || req.headers['x-license-key'];
-
-        // 1. Authentification par Clé API (Si fournie par le mobile)
-        if (apiKeyHeader) {
-            const { data: manager, error } = await supabaseAdmin
-                .from('managers')
-                .select('id, email')
-                .eq('api_key', apiKeyHeader)
-                .single();
-
-            if (error || !manager) throw new Error('API Key invalide.');
-
-            req.user = { manager_id: manager.id, email: manager.email, method: 'api_key' };
-            return next();
-        }
-
-        // 2. Authentification par JWT Supabase
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return res.status(401).json({
-                success: false,
-                error: {
-                    code: 'UNAUTHORIZED_MISSING_TOKEN',
-                    message: 'Token d\'authentification ou Clé API manquante.'
-                }
-            });
-        }
-
-        const token = authHeader.split('Bearer ')[1];
-
-        // Vérification du token directement avec Supabase
-        const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-
-        if (authError || !user) {
-            throw new Error('Token invalide ou expiré.');
-        }
-
-        // Injection du Pivot de Sécurité Multi-Tenant
+        const identity = await IdentityResolver.resolveRequestIdentity(req);
         req.user = {
-            manager_id: user.id, // Supabase UID pour les politiques RLS
-            email: user.email,
-            method: 'jwt'
+            ...identity,
+            role: normalizeRole(identity.role, 'client')
         };
-
-        next();
+        return next();
     } catch (error) {
-        return res.status(401).json({
+        return res.status(error.statusCode || 401).json({
             success: false,
             error: {
-                code: 'UNAUTHORIZED_INVALID_CREDENTIALS',
+                code: error.code || 'UNAUTHORIZED_INVALID_CREDENTIALS',
                 message: error.message || 'Accès refusé. Token invalide ou expiré.'
             }
         });
@@ -86,44 +101,72 @@ export const requirePartnerAuth = async (req, res, next) => {
         const token = req.cookies?.partner_token || (req.headers.authorization && req.headers.authorization.startsWith('Bearer ') ? req.headers.authorization.split(' ')[1] : null);
 
         if (!token) {
-            return res.status(401).send('<script>window.location.href="/partners/auth";</script>');
+            return res.status(401).send('<script>window.location.href="/auth/reseller";</script>');
         }
 
         const decoded = jwt.verify(token, JWT_SECRET);
-        req.user = { id: decoded.id };
+        req.user = {
+            id: decoded.id,
+            role: normalizeRole(decoded.role, 'reseller')
+        };
         next();
     } catch (error) {
-        return res.status(401).send('<script>window.location.href="/partners/auth";</script>');
+        return res.status(401).send('<script>window.location.href="/auth/reseller";</script>');
     }
 };
 
+const ADMIN_SESSION_COOKIE = 'admin_session';
+
+const createAdminSessionToken = (username) => jwt.sign(
+    {
+        sub: username,
+        role: 'admin'
+    },
+    JWT_SECRET,
+    { expiresIn: '12h' }
+);
+
+export const issueAdminSession = (res, username, { secure = process.env.NODE_ENV === 'production' } = {}) => {
+    const sessionToken = createAdminSessionToken(username);
+
+    res.cookie(ADMIN_SESSION_COOKIE, sessionToken, {
+        httpOnly: true,
+        secure,
+        sameSite: 'Lax',
+        maxAge: 12 * 60 * 60 * 1000
+    });
+};
+
 /**
- * 🔒 Middleware d'authentification Admin (Token serveur uniquement)
+ * 🔒 Middleware d'authentification Admin (session username/password)
  */
 export const requireAdminAuth = (req, res, next) => {
-    const configuredToken = process.env.ADMIN_DASHBOARD_TOKEN;
+    const configuredUsername = process.env.ADMIN_DASHBOARD_USERNAME || 'admin';
+    const configuredPassword = process.env.ADMIN_DASHBOARD_PASSWORD || process.env.ADMIN_DASHBOARD_TOKEN;
 
-    if (!configuredToken) {
+    if (!configuredUsername || !configuredPassword) {
         return res.status(500).json({
             success: false,
             error: {
                 code: 'ADMIN_AUTH_NOT_CONFIGURED',
-                message: 'ADMIN_DASHBOARD_TOKEN est manquant côté serveur.'
+                message: 'ADMIN_DASHBOARD_USERNAME ou ADMIN_DASHBOARD_PASSWORD est manquant côté serveur.'
             }
         });
     }
 
     const authHeader = req.headers.authorization;
-    const bearerToken = authHeader?.startsWith('Bearer ')
+    const bearerSession = authHeader?.startsWith('Bearer ')
         ? authHeader.split(' ')[1]
         : null;
+    const cookieSession = req.cookies?.[ADMIN_SESSION_COOKIE];
+    const providedSession = cookieSession || bearerSession;
 
-    const providedTokenHeader = req.headers['x-admin-token'];
-    const providedToken = Array.isArray(providedTokenHeader)
-        ? providedTokenHeader[0]
-        : (providedTokenHeader || bearerToken);
+    if (!providedSession) {
+        const acceptsHtml = req.headers.accept?.includes('text/html');
+        if (acceptsHtml) {
+            return res.status(401).send('<script>window.location.href="/admin/auth";</script>');
+        }
 
-    if (!safeCompare(providedToken, configuredToken)) {
         return res.status(401).json({
             success: false,
             error: {
@@ -133,5 +176,39 @@ export const requireAdminAuth = (req, res, next) => {
         });
     }
 
-    return next();
+    try {
+        const decoded = jwt.verify(providedSession, JWT_SECRET);
+        const sessionUsername = typeof decoded === 'object' ? decoded.sub : null;
+        const sessionRole = typeof decoded === 'object' ? decoded.role : null;
+
+        if (!safeCompare(sessionUsername, configuredUsername) || sessionRole !== 'admin') {
+            throw new Error('INVALID_ADMIN_SESSION');
+        }
+
+        req.user = {
+            ...(req.user || {}),
+            email: configuredUsername,
+            role: normalizeRole('admin', 'admin')
+        };
+
+        return next();
+    } catch (error) {
+        const acceptsHtml = req.headers.accept?.includes('text/html');
+        if (acceptsHtml) {
+            return res.status(401).send('<script>window.location.href="/admin/auth";</script>');
+        }
+
+        return res.status(401).json({
+            success: false,
+            error: {
+                code: 'UNAUTHORIZED_ADMIN',
+                message: 'Session admin invalide ou expirée.'
+            }
+        });
+    }
 };
+
+export const requireAdminRole = requireRole('admin');
+export const requireClientRole = requireRole('client', 'admin');
+export const requireManagerRole = requireClientRole;
+export const requireResellerRole = requireRole('reseller', 'admin');

@@ -1,3 +1,5 @@
+import { logger } from '../config/logger.js';
+
 /**
  * Gère les routes qui n'existent pas (404)
  */
@@ -13,10 +15,17 @@ export const notFoundHandler = (req, res, next) => {
  */
 export const errorHandler = (error, req, res, next) => {
     // Si res.statusCode n'a pas été défini (ex: serveur crash), alors on force un 500
-    const statusCode = res.statusCode === 200 ? 500 : res.statusCode;
+    const statusCode = error.statusCode || (res.statusCode === 200 ? 500 : res.statusCode);
 
     // Log interne de l'erreur
-    console.error(`[ERROR] ${error.message}`, error.stack);
+    logger.error({
+        code: error.code || 'SERVER_ERROR',
+        statusCode,
+        path: req.originalUrl,
+        method: req.method,
+        details: error.details,
+        stack: error.stack
+    }, error.message);
 
     // Format JSON Standardisé Entreprise (JSend)
     res.status(statusCode).json({
@@ -29,4 +38,3 @@ export const errorHandler = (error, req, res, next) => {
         }
     });
 };
-
